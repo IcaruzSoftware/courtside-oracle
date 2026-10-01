@@ -1,0 +1,37 @@
+name: Diagnose NBA data access (temporary)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install -q requests nba_api
+      - name: Probe endpoints from a GitHub-hosted runner
+        shell: python
+        run: |
+          import requests, time
+          from nba_api.stats.library.http import STATS_HEADERS
+          cdn = {"Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
+                 "Origin": "https://www.nba.com", "Referer": "https://www.nba.com/",
+                 "Sec-Fetch-Dest": "empty", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site",
+                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"}
+          probes = [
+            ("cdn schedule", "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json", cdn),
+            ("cdn boxscore", "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_0042500405.json", cdn),
+            ("stats gamelog", "https://stats.nba.com/stats/leaguegamelog?Counter=0&Direction=ASC&LeagueID=00&PlayerOrTeam=T&Season=2025-26&SeasonType=Playoffs&Sorter=DATE", STATS_HEADERS),
+            ("stats boxscore adv", "https://stats.nba.com/stats/boxscoreadvancedv3?GameID=0042500405&StartPeriod=0&EndPeriod=0&StartRange=0&EndRange=0&RangeType=0", STATS_HEADERS),
+            ("espn scoreboard", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=20260613", {}),
+            ("espn summary", "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=401809839", {}),
+          ]
+          for name, url, headers in probes:
+              t = time.time()
+              try:
+                  r = requests.get(url, headers=headers, timeout=40)
+                  print(f"{name:20s} HTTP {r.status_code}  {len(r.content):>9} bytes  {time.time()-t:5.1f}s  {r.text[:60]!r}")
+              except Exception as e:
+                  print(f"{name:20s} ERROR {type(e).__name__}  {time.time()-t:5.1f}s")
