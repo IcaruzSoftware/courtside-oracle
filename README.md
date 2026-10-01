@@ -1,169 +1,146 @@
-# courtside-oracle
+# Courtside Oracle
 
-67.55% accurate NBA game outcome predictor using XGBoost + SHAP. Runs daily via GitHub Actions, stores predictions and results in Supabase, and exposes data for a Next.js website integration.
+An NBA game-outcome predictor: a custom per-player ELO system feeds an
+XGBoost classifier, predictions run daily via GitHub Actions, and results are
+tracked publicly in Supabase and shown on a small Next.js site.
 
-**Live accuracy tracked publicly** — every prediction is logged with a confidence score and marked correct or incorrect after games complete.
+**Live site:** https://courtside-oracle.gerritvisser.de
+**Embedded widget:** the `/card` page is embedded as a 420×260 iframe on
+https://gerritvisser.de
 
----
+Every prediction is logged with a confidence score before tip-off and marked
+correct/incorrect the next morning once the game is final — the running
+record on the site is the real, live track record, not a backtest number.
 
 ## Architecture
 
 ```
-nba_api  →  collect.py  →  data/raw/
-                              ↓
-                          features.py  →  feature matrix
-                              ↓
-                          train.py  →  models/xgb_model.pkl
-                              ↓
-         daily_run.py ──┬──  predict.py  →  Supabase: predictions + shap_values
-   (GitHub Actions cron) └──  evaluate.py  →  Supabase: correct/incorrect + running_record
+                     One-time bootstrap
+  stats.nba.com → bootstrap_data.py → src/data/raw/
+                                          │
+                                          ▼
+                              elo.py --force → player_elo*.parquet
+                                          │
+                                          ▼
+                  build_dataset.py → feature_matrix.parquet → train.py → models/xgb_model.pkl
+
+                     Daily automation (GitHub Actions)
+  cdn.nba.com → daily_state.py  → src/data/raw/*.csv (appended) → elo.py (incremental update)
+  cdn.nba.com → evaluate.py     → Supabase: predictions.correct, running_record
+  cdn.nba.com → predict.py      → features.py (live) → xgb_model.pkl → Supabase: predictions, shap_values
+                                          │
+                                          ▼
+                        Supabase (Postgres, RLS)  →  web/ (Next.js, static export)  →  Vercel
 ```
 
----
+Full breakdown of each stage: [docs/architecture.md](docs/architecture.md).
+Every file the pipeline reads/writes and every Supabase table:
+[docs/data.md](docs/data.md).
 
-## Local setup
+## Quick start (local)
 
-### 1. Install dependencies
+Requires Python 3.12 (matches CI). From the repo root:
 
 ```bash
+python -m venv .venv
+.venv\Scripts\activate        # Windows; use `source .venv/bin/activate` on macOS/Linux
 pip install -r requirements.txt
 ```
 
-### 2. Set environment variables
-
-Create a `.env` file (never commit this) or export directly:
+Create a `.env` file or export directly (never commit these):
 
 ```bash
 export SUPABASE_URL=https://your-project.supabase.co
 export SUPABASE_KEY=your-service-role-key
 ```
 
-### 3. Set up Supabase schema
+Set up the Supabase schema once — paste `src/supabase/schema.sql` into the
+Supabase SQL editor and run it. (Upgrading an existing, older database?
+See [docs/operations.md](docs/operations.md#applying-a-supabase-migration).)
 
-In the Supabase dashboard → SQL Editor, paste and run the contents of:
-
-```
-src/supabase/schema.sql
-```
-
----
-
-## Running the pipeline
-
-### Full historical data pull (one-time bootstrap)
-
-Pulls game logs, player stats, and box scores from 2000-01 through 2024-25.
-**Expect 2–6 hours** — nba_api requires rate limiting between requests.
+Run the tests:
 
 ```bash
-python src/pipeline/collect.py
+python -m pytest
 ```
 
-Data is saved to `src/data/raw/`. Already-cached seasons are skipped on re-runs.
-
-### Feature engineering
-
-Feature engineering is scaffolded in `src/pipeline/features.py` — implement the `TODO` blocks before training.
-Once complete, generate the feature matrix:
+Run the daily pipeline manually:
 
 ```bash
-python -c "from pipeline.features import build_feature_matrix; ..."
+python src/scripts/daily_run.py                          # evaluate + predict, both, for today (ET)
+python src/scripts/daily_run.py --predict --dry-run       # print instead of writing to Supabase
+python src/scripts/daily_run.py --evaluate --date 2026-11-05
 ```
 
-(Implement a batch script here once feature logic is filled in.)
-
-### Train the model
+Predict a single matchup from the CLI:
 
 ```bash
-python src/pipeline/train.py
+python src/pipeline/predict.py --game-id 0042500237                       # a game already in the data
+python src/pipeline/predict.py --home NYK --away OKC --date 2026-06-05    # a hypothetical matchup
 ```
 
-Outputs:
-- `src/models/xgb_model.pkl` — saved model
-- `src/data/processed/train_metrics.json` — accuracy, AUC-ROC, Brier score
-- `src/data/processed/feature_importance.csv` — ranked feature importance
+## Daily automation
 
-### Run the daily pipeline manually
+Three scheduled GitHub Actions workflows keep the site current:
 
-```bash
-python src/scripts/daily_run.py
-```
+- **Daily Predictions** (`daily_predict.yml`) — 11:00 AM ET, predicts every
+  regular-season/playoff/play-in/Cup-final game tipping off that day.
+- **Daily Evaluate** (`daily_evaluate.yml`) — 8:00 AM ET, resolves yesterday's
+  predictions against final box scores, recomputes the running record, and
+  advances the committed ELO/state files from the NBA CDN.
+- **Keepalive** (`keepalive.yml`) — pings Supabase daily so the free-tier
+  project doesn't auto-pause, and re-enables the other two workflows (GitHub
+  auto-disables scheduled workflows in public repos after 60 days of
+  inactivity).
 
-This runs evaluate (yesterday's results) then predict (today's games) in sequence.
+Full schedules, required secrets, and what to do when one of these fails:
+[docs/operations.md](docs/operations.md).
 
-### Generate global SHAP plots
+## The website / iframe
 
-```bash
-python -c "
-from pipeline.shap_export import generate_global_shap_plots, generate_shap_summary_stats
-import pickle, pandas as pd
-model = pickle.load(open('src/models/xgb_model.pkl', 'rb'))
-X = pd.read_csv('src/data/processed/feature_matrix.csv').drop(columns=['game_date','game_id','home_team_win'])
-generate_global_shap_plots(model, X.tail(2000))
-generate_shap_summary_stats(model, X.tail(2000))
-"
-```
+`web/` is a Next.js 15 app, statically exported (`output: "export"`) and
+deployed to Vercel — there's no server runtime, so all Supabase reads happen
+client-side with the public anon key. `app/(main)/` is the full site;
+`app/card/` is the compact widget embedded elsewhere. Env vars
+(`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`) are set in the
+Vercel project, not in GitHub secrets. Local dev: `cd web && npm install && npm run dev`.
 
----
+## Bootstrap / full rebuild
 
-## Feature engineering
+The historical dataset (2015-16 through 2025-26, ~14,100 games) and the ELO
+state were rebuilt once from scratch with `src/scripts/bootstrap_data.py`
+(expect several hours, unattended) followed by `python src/pipeline/elo.py --force`.
+You shouldn't need to do this unless the raw data or ELO state is lost again
+— procedure and background: [docs/operations.md](docs/operations.md).
 
-`src/pipeline/features.py` is scaffolded with:
+## The model
 
-**Fully implemented helpers:**
-- `rolling_window(series, window)` — mean of last N non-null values
-- `split_home_away(team_id, game_log_df)` — splits a team's games by home/away
-- `days_rest_calculator(team_id, game_date, game_log_df)` — integer days since last game
-- `is_back_to_back(team_id, game_date, game_log_df)` — 0/1 flag
+An XGBoost binary classifier (home-team win probability), Platt-calibrated,
+trained on a custom 7-skill-per-player ELO system plus rolling team form,
+rest, head-to-head, and efficiency features. On a chronological, held-out
+test set of 2,116 games: **67.5% accuracy, 0.729 AUC-ROC, 0.209 Brier score,
+0.606 log loss**.
 
-**Feature functions (TODO — implement the logic):**
-| Function | Features returned |
-|---|---|
-| `get_team_rolling_stats` | Last-5, last-10, season avg for pts/reb/ast/TO/ratings |
-| `get_home_away_splits` | Win%, pts avg, pts allowed for home vs away |
-| `get_rest_features` | Days rest, back-to-back flag, games in last 7 days |
-| `get_head_to_head_features` | H2H wins/losses this season |
-| `get_player_availability_features` | Availability score, star player out flag |
-| `get_efficiency_differential_features` | Offensive vs defensive rating matchup diff |
-| `get_player_form_features` | Top-3 players' recent form vs season average |
-| `get_streak_features` | Win/loss streak, last-5 win % |
+**Honest note:** that backtest number is optimistic relative to what the
+live pipeline actually delivers, mainly because training sees each
+historical game's real box-score lineup and full-season stats, while live
+prediction has to approximate both from the committed ELO state and
+season-to-date stats. Expect live accuracy below 67.5% — the site's running
+record is the number to trust. Full explanation of the gap, feature list,
+and training procedure: [docs/model.md](docs/model.md). Player ELO design in
+detail: [docs/elo.md](docs/elo.md).
 
----
+## Docs
 
-## Gitignored (regenerate locally)
+- [docs/architecture.md](docs/architecture.md) — components, data flow, module responsibilities
+- [docs/operations.md](docs/operations.md) — runbook: workflows, secrets, failure modes, bootstrap, migrations, deploys
+- [docs/data.md](docs/data.md) — every data file and Supabase table, columns the code relies on
+- [docs/elo.md](docs/elo.md) — the player ELO system
+- [docs/model.md](docs/model.md) — features, training, metrics, caveats
 
-- `src/data/raw/` — regenerate with `collect.py`
-- `src/data/processed/` — regenerate by running features + train
-- `src/models/*.pkl` — regenerate with `train.py`
+For an AI coding session working in this repo, start with
+[CLAUDE.md](CLAUDE.md) instead of this file.
 
----
+## License
 
-## GitHub Actions setup
-
-Add a workflow file at `.github/workflows/daily.yml`:
-
-```yaml
-name: Daily predictions
-
-on:
-  schedule:
-    - cron: '0 14 * * *'  # 10am ET — adjust for your timezone / tipoff window
-  workflow_dispatch:
-
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - run: python src/scripts/daily_run.py
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-```
-
-Add `SUPABASE_URL` and `SUPABASE_KEY` to your repository's GitHub Actions secrets.
-The model file is not committed — you'll need to either commit it or download it as an artifact in CI.
+MIT — see [LICENSE](LICENSE).
