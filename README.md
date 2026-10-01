@@ -30,7 +30,7 @@ record on the site is the real, live track record, not a backtest number.
   cdn.nba.com → predict.py      → features.py (live) → xgb_model.pkl → Supabase: predictions, shap_values
                                           │
                                           ▼
-                        Supabase (Postgres, RLS)  →  web/ (Next.js, static export)  →  Vercel
+      Supabase (Postgres, RLS)  →  web/ (Next.js, static export)  →  manual build+upload  →  Plesk/nginx
 ```
 
 Full breakdown of each stage: [docs/architecture.md](docs/architecture.md).
@@ -99,11 +99,14 @@ Full schedules, required secrets, and what to do when one of these fails:
 ## The website / iframe
 
 `web/` is a Next.js 15 app, statically exported (`output: "export"`) and
-deployed to Vercel — there's no server runtime, so all Supabase reads happen
-client-side with the public anon key. `app/(main)/` is the full site;
-`app/card/` is the compact widget embedded elsewhere. Env vars
-(`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`) are set in the
-Vercel project, not in GitHub secrets. Local dev: `cd web && npm install && npm run dev`.
+served from the owner's own Plesk/nginx server — there's no server runtime,
+so all Supabase reads happen client-side with the public anon key.
+`app/(main)/` is the full site; `app/card/` is the compact widget embedded
+elsewhere. Env vars (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`)
+go in `web/.env.local` at build time, not in GitHub secrets. Deploying is a
+manual build + upload, not a push-to-deploy — see
+[docs/operations.md](docs/operations.md#deploying-the-web-app). Local dev:
+`cd web && npm install && npm run dev`.
 
 ## Bootstrap / full rebuild
 

@@ -69,7 +69,7 @@ All three live in `.github/workflows/` and run on `ubuntu-latest` with Python
 | Secret | Used by | Notes |
 |---|---|---|
 | `SUPABASE_URL` | `daily_predict.yml`, `daily_evaluate.yml`, `keepalive.yml` | Public project URL, safe to also keep in local `.env` |
-| `SUPABASE_KEY` | same | **Service-role key** — bypasses RLS, full read/write. Never expose this to the web app (see `web`'s `NEXT_PUBLIC_SUPABASE_ANON_KEY`, which is a different, RLS-restricted key set in Vercel, not GitHub) |
+| `SUPABASE_KEY` | same | **Service-role key** — bypasses RLS, full read/write. Never expose this to the web app (see `web`'s `NEXT_PUBLIC_SUPABASE_ANON_KEY`, which is a different, RLS-restricted key baked in at build time via `web/.env.local` — not a GitHub secret, see "Deploying the web app" below) |
 | `NBA_PROXIES` | `daily_predict.yml`, `daily_evaluate.yml`, `check_nba_proxies.yml` | 1–3 static residential proxies, comma-separated `http(s)://user:pass@host:port`. URL-encode special characters in the password (e.g. `@`→`%40`) or urllib3 fails to parse it. Unset/empty → direct connection (local dev). Required in CI (see below). |
 
 `PROXIES` (singular, no `NBA_` prefix) is **obsolete** — it was only ever read
@@ -184,23 +184,57 @@ unmigrated database.
 
 ## Deploying the web app
 
-Hosted on Vercel (team "icaruz-software"), static export
-(`output: "export"` in `next.config.ts` — no server runtime, so all data
-fetching is client-side; Next's `headers()` and ISR do not apply here).
-Deploys on push to `main` via Vercel's GitHub integration. Required env vars
-in the Vercel project settings (not GitHub secrets — this is a separate,
-public-safe anon key):
+**Not automatic — pushing to `main` does not update the live site.** The
+site is a static export (`output: "export"` in `next.config.ts`) served from
+the owner's own Plesk/nginx server (confirmed: `courtside-oracle.gerritvisser.de`
+and `gerritvisser.de` both resolve to the same server, 185.45.149.138; the
+live `/card` files on it date from 2026-06-19). There's a Vercel project
+somewhere in this repo's history too, but what's actually serving the live
+site is that Plesk server — treat Vercel as not relevant to the deploy
+procedure below.
 
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+Because it's a static export, all data fetching happens client-side in the
+browser directly against Supabase (anon key) — so changes to the *data*
+(predictions, running record) show up immediately with no redeploy. Only
+code/layout changes need the steps below.
 
-Local dev: `cd web && npm install && npm run dev`. `npm run build` runs the
-static export; `npm run lint` runs `next lint`.
+Deploy procedure:
+
+1. Create `web/.env.local` (gitignored, never commit it) with the two
+   build-time env vars — both are public values that get baked into the
+   static JS bundle, not secrets:
+   ```
+   NEXT_PUBLIC_SUPABASE_URL=https://pxvimjflsishbfrublwp.supabase.co
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
+   ```
+2. **If this build is the first one to query `game_time_utc`**, confirm
+   [migration 001 has been applied](#applying-a-supabase-migration) to the
+   target Supabase project first — otherwise the `/card` page's
+   `getCardPrediction()` query fails outright.
+3. Build locally:
+   ```bash
+   cd web && npm run build
+   ```
+   This produces the static export in `web/out/`.
+4. Manually upload the contents of `web/out/` to the
+   `courtside-oracle.gerritvisser.de` subdomain's document root on the Plesk
+   server.
+
+**The CSP `frame-ancestors` header that allows `/card` to be iframed on
+gerritvisser.de is set by the server/nginx config, not by the Next.js app** —
+a static export can't set response headers itself (`next.config.ts`'s
+`headers()` doesn't run in `output: "export"`). That header must stay
+configured server-side independently of anything in this repo; it won't
+survive a server/vhost change unless someone re-adds it there.
+
+Local dev: `cd web && npm install && npm run dev`. `npm run lint` runs
+`next lint`.
 
 The `/card` route (420×260) is the standalone widget embedded as an iframe on
 the portfolio site (`IcaruzSoftware/portfolio`, https://gerritvisser.de) —
-that embed lives in a different repo, so a breaking change to `/card`'s
-markup or query shape needs a corresponding check there.
+the iframe points at `https://courtside-oracle.gerritvisser.de/card`, so
+uploading a new build updates the embedded card too; there is nothing to
+change in the portfolio repo itself unless the iframe URL changes.
 
 ## Season rollover
 

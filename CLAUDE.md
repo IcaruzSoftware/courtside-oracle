@@ -21,7 +21,7 @@ daily: cdn.nba.com → daily_state.py → state files → elo.py (incremental)
 daily: cdn.nba.com → evaluate.py    → Supabase (resolve predictions, running_record)
 daily: cdn.nba.com → predict.py     → features.py (live) → xgb_model.pkl → Supabase
                                                        │
-                                    Supabase (RLS) → web/ (Next.js static export) → Vercel
+                        Supabase (RLS) → web/ (Next.js static export) → manual build+upload → Plesk/nginx
 ```
 
 Details: [docs/architecture.md](docs/architecture.md) (module-by-module +
@@ -56,7 +56,7 @@ src/supabase/
   daily_predict.yml   11:00 AM ET — predict today's games
   daily_evaluate.yml  8:00 AM ET — resolve results + advance committed state
   keepalive.yml       daily — ping Supabase, re-enable workflows GitHub auto-disabled
-web/                  Next.js 15, static export, deployed to Vercel; app/(main)/ = site, app/card/ = iframe widget
+web/                  Next.js 15, static export; manual build+upload to the owner's Plesk server (no auto-deploy); app/(main)/ = site, app/card/ = iframe widget
 tests/                pytest; conftest.py has a FakeSupabase + a tiny built-from-fixture live state
 ```
 
@@ -165,14 +165,21 @@ Two unrelated sources, never mixed in one run:
 
 - **Supabase** project `pxvimjflsishbfrublwp` (free tier; pauses after ~7
   days idle, kept awake by `keepalive.yml`). Service-role key in GitHub
-  secrets (`SUPABASE_KEY`); anon key in Vercel env
-  (`NEXT_PUBLIC_SUPABASE_ANON_KEY`) — never the same key in both places.
+  secrets (`SUPABASE_KEY`); anon key goes into `web/.env.local`
+  (`NEXT_PUBLIC_SUPABASE_ANON_KEY`) at build time — never the same key in
+  both places.
 - **NBA proxies**: GitHub secret `NBA_PROXIES` (comma-separated
   `http(s)://user:pass@host:port`, 1–3 static residential proxies) routes the
   daily CDN calls past NBA's cloud-IP block. Passed to `daily_predict.yml`,
   `daily_evaluate.yml`, and `check_nba_proxies.yml`. The old `PROXIES` secret
   (nba_api proxy-pool, bootstrap only) is obsolete and unused by the pipeline.
-- **Vercel** team "icaruz-software", static export, deploys on push to `main`.
+- **The owner's Plesk server** (nginx; `courtside-oracle.gerritvisser.de` and
+  `gerritvisser.de` both resolve to it) serves the static export. No
+  auto-deploy — see [docs/operations.md](docs/operations.md#deploying-the-web-app)
+  for the manual build + upload procedure. The CSP `frame-ancestors` header
+  that lets `/card` be iframed on `gerritvisser.de` is set in the server
+  config, not by the Next.js app (a static export can't set response headers
+  itself).
 - **Portfolio embed**: `/card` is iframed from `IcaruzSoftware/portfolio` — a
   breaking change to its markup/query needs a check in that repo too.
 - **GitHub Actions**: public repo, so GitHub auto-disables scheduled
@@ -214,8 +221,10 @@ Two unrelated sources, never mixed in one run:
   [docs/operations.md](docs/operations.md#applying-a-supabase-migration).
   `001` must land before deploying any web build that queries
   `game_time_utc`.
-- **Deploy the web app** — push to `main`; Vercel auto-deploys. Local
-  preview: `cd web && npm run build`.
+- **Deploy the web app** — not push-to-deploy: `cd web && npm run build`
+  (with `web/.env.local` set), then manually upload `web/out/`'s contents to
+  the subdomain on the Plesk server — see
+  [docs/operations.md](docs/operations.md#deploying-the-web-app).
 - **Rebuild ELO / bootstrap from scratch** — see
   [docs/operations.md](docs/operations.md#full-historical-bootstrap--elo-rebuild)
   (~7h unattended); commit only the state files listed above, never raw data.

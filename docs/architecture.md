@@ -27,7 +27,7 @@
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
                                           │
                                           ▼
-                     Supabase (Postgres, RLS)  ──▶  web/ (Next.js static export)  ──▶  Vercel
+         Supabase (Postgres, RLS)  ──▶  web/ (Next.js static export)  ──▶  manual build+upload  ──▶  Plesk/nginx
 ```
 
 Two independent NBA data sources feed this (details in
