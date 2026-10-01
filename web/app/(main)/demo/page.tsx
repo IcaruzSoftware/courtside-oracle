@@ -5,6 +5,7 @@ const mockPrediction: Prediction = {
   id: "demo-1",
   game_id: "0000000000",
   game_date: new Date().toISOString().split("T")[0],
+  game_time_utc: null,
   home_team: "NYK",
   away_team: "BOS",
   home_team_id: "1610612752",

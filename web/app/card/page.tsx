@@ -1,22 +1,42 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getRecentPredictions, getRunningRecord } from "@/lib/supabase";
+import { getCardPrediction, getRunningRecord } from "@/lib/supabase";
 import { TEAM_NAMES } from "@/lib/teams";
 import type { Prediction, RunningRecord } from "@/lib/types";
 import TeamLogo from "@/components/TeamLogo";
 
+const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+
 export default function CardPage() {
   const [prediction, setPrediction] = useState<Prediction | null>(null);
+  const [isUpcoming, setIsUpcoming] = useState(true);
   const [record, setRecord] = useState<RunningRecord | null>(null);
 
   useEffect(() => {
-    Promise.all([getRecentPredictions(1), getRunningRecord()]).then(
-      ([preds, rec]) => {
-        setPrediction(preds[0] ?? null);
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const [card, rec] = await Promise.all([
+          getCardPrediction(),
+          getRunningRecord(),
+        ]);
+        if (cancelled) return;
+        setPrediction(card?.prediction ?? null);
+        setIsUpcoming(card?.isUpcoming ?? true);
         setRecord(rec);
+      } catch {
+        if (cancelled) return;
+        setPrediction(null);
+        setRecord(null);
       }
-    );
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const correct = record?.total_correct ?? 0;
@@ -30,6 +50,19 @@ export default function CardPage() {
     ? (TEAM_NAMES[prediction.predicted_team] ?? prediction.predicted_team)
     : null;
 
+  const tipoffMs = prediction?.game_time_utc ? new Date(prediction.game_time_utc).getTime() : null;
+  const now = Date.now();
+  const isLive = isUpcoming && tipoffMs !== null && tipoffMs <= now && now < tipoffMs + THREE_HOURS_MS;
+  const tipoffLabel = isUpcoming && !isLive && tipoffMs !== null
+    ? new Date(tipoffMs).toLocaleString("en-US", {
+        timeZone: "America/New_York",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      }) + " ET"
+    : null;
+
   return (
     <div className="w-full h-screen bg-brand-bg flex flex-col overflow-hidden">
 
@@ -41,19 +74,26 @@ export default function CardPage() {
             NBA <span className="text-brand-green">PREDICTIONS</span>
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-1.5 h-1.5 rounded-full bg-brand-green" />
-          <span className="text-[10px] text-brand-green tracking-widest uppercase font-bold">LIVE</span>
-        </div>
+        {isLive && (
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-brand-green" />
+            <span className="text-[10px] text-brand-green tracking-widest uppercase font-bold">LIVE</span>
+          </div>
+        )}
+        {!isLive && tipoffLabel && (
+          <span className="text-[10px] text-brand-muted tracking-widest uppercase font-bold">
+            {tipoffLabel}
+          </span>
+        )}
       </div>
 
       {/* Game + Predicted winner */}
       <div className="flex-1 grid grid-cols-2 divide-x divide-brand-border border-b border-brand-border min-h-0">
 
-        {/* Next game */}
+        {/* Game */}
         <div className="px-5 py-4 flex flex-col">
           <p className="text-[9px] tracking-widest uppercase text-brand-muted mb-3">
-            📅 NEXT GAME
+            📅 {isUpcoming ? "NEXT GAME" : "LAST GAME"}
           </p>
           {prediction ? (
             <div className="flex items-center gap-3 flex-1">
@@ -72,19 +112,25 @@ export default function CardPage() {
           )}
         </div>
 
-        {/* Predicted winner */}
+        {/* Predicted winner / result */}
         <div className="px-5 py-4 flex flex-col">
           <p className="text-[9px] tracking-widest uppercase text-brand-muted mb-3">
-            🏆 PREDICTED WINNER
+            🏆 {isUpcoming ? "PREDICTED WINNER" : "RESULT"}
           </p>
           {prediction ? (
             <div className="flex-1 flex flex-col justify-center">
               <p className="text-xl font-black text-white tracking-tight leading-none uppercase">
                 {winnerName}
               </p>
-              <p className="text-xs text-brand-green font-semibold mt-1.5">
-                ({confidence}% Confidence)
-              </p>
+              {isUpcoming ? (
+                <p className="text-xs text-brand-green font-semibold mt-1.5">
+                  ({confidence}% Confidence)
+                </p>
+              ) : (
+                <p className={`text-xs font-semibold mt-1.5 ${prediction.correct ? "text-brand-green" : "text-red-400"}`}>
+                  {prediction.correct ? "✓ Correct" : "✗ Wrong"} ({confidence}% Confidence)
+                </p>
+              )}
             </div>
           ) : (
             <p className="text-xs text-brand-muted">No prediction yet</p>

@@ -2,6 +2,7 @@ export interface Prediction {
   id: string;
   game_id: string;
   game_date: string;
+  game_time_utc: string | null;
   home_team: string;
   away_team: string;
   home_team_id: string | null;

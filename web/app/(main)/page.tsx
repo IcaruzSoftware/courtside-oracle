@@ -1,32 +1,56 @@
+"use client";
+
+import { useEffect, useState } from "react";
 import { getRecentPredictions, getRunningRecord, getShapValues } from "@/lib/supabase";
+import { getEasternDateString } from "@/lib/date";
 import GameCard from "@/components/GameCard";
 import RecordStats from "@/components/RecordStats";
 import RecentPredictionsTable from "@/components/RecentPredictionsTable";
-import type { ShapValue } from "@/lib/types";
+import type { Prediction, RunningRecord, ShapValue } from "@/lib/types";
 
-export const revalidate = 300; // revalidate every 5 minutes
+export default function HomePage() {
+  const [predictions, setPredictions] = useState<Prediction[]>([]);
+  const [record, setRecord] = useState<RunningRecord | null>(null);
+  const [shapMap, setShapMap] = useState<Record<string, ShapValue[]>>({});
 
-export default async function HomePage() {
-  const [predictions, record] = await Promise.all([
-    getRecentPredictions(50).catch(() => []),
-    getRunningRecord().catch(() => null),
-  ]);
+  useEffect(() => {
+    let cancelled = false;
 
-  const today = new Date().toISOString().split("T")[0];
-  const todaysPredictions  = predictions.filter(p => p.game_date === today);
-  const recentPredictions  = predictions.filter(p => p.game_date !== today);
+    async function load() {
+      const [preds, rec] = await Promise.all([
+        getRecentPredictions(50).catch(() => []),
+        getRunningRecord().catch(() => null),
+      ]);
+      if (cancelled) return;
+      setPredictions(preds);
+      setRecord(rec);
 
-  // Fetch SHAP values for today's games
-  const shapMap: Record<string, ShapValue[]> = {};
-  await Promise.all(
-    todaysPredictions.map(async (p) => {
-      try {
-        shapMap[p.id] = await getShapValues(p.id);
-      } catch {
-        shapMap[p.id] = [];
-      }
-    })
-  );
+      const today = getEasternDateString();
+      const todaysPredictions = preds.filter(p => p.game_date === today);
+
+      // Fetch SHAP values for today's games
+      const shapEntries = await Promise.all(
+        todaysPredictions.map(async (p): Promise<[string, ShapValue[]]> => {
+          try {
+            return [p.id, await getShapValues(p.id)];
+          } catch {
+            return [p.id, []];
+          }
+        })
+      );
+      if (cancelled) return;
+      setShapMap(Object.fromEntries(shapEntries));
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const today = getEasternDateString();
+  const todaysPredictions = predictions.filter(p => p.game_date === today);
+  const recentPredictions = predictions.filter(p => p.game_date !== today);
 
   return (
     <div className="space-y-12">
