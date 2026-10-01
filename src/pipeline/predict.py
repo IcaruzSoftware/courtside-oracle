@@ -129,7 +129,7 @@ def predict_matchup(
         game_date:       ISO date string "YYYY-MM-DD"
         game_log_df:     Combined game log (all seasons)
         player_stats_df: Season player stats for the relevant season
-        season:          Season string e.g. "2025-26"
+        season:          Season string e.g. "2023-24"
         game_id:         10-digit game ID if known (fake ID for hypothetical games)
 
     Returns:
@@ -170,6 +170,160 @@ def predict_matchup(
         "shap_features":  shap_features,
         "feature_dict":   feature_dict,
     }
+
+
+# ---------------------------------------------------------------------------
+# Today's games (daily pipeline entry point)
+# ---------------------------------------------------------------------------
+
+PREDICTION_COLS = [
+    "game_id", "game_date", "game_time_utc", "home_team", "away_team",
+    "home_team_id", "away_team_id", "predicted_winner", "predicted_team",
+    "home_win_prob", "away_win_prob", "confidence",
+]
+
+
+def _today_et() -> str:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+
+
+def _prev_season(season: str) -> str:
+    start = int(season[:4])
+    return f"{start - 1}-{str(start)[2:]}"
+
+
+def _get_supabase():
+    from supabase import create_client
+    import os
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_KEY")
+    if not url or not key:
+        raise EnvironmentError("SUPABASE_URL and SUPABASE_KEY must be set.")
+    return create_client(url, key)
+
+
+def predict_todays_games(
+    date: str | None = None,
+    dry_run: bool = False,
+    schedule: dict | None = None,
+    db=None,
+) -> list[dict]:
+    """
+    Predict every stateful game (regular season / playoffs / play-in / Cup final)
+    on an ET date and upsert the results to Supabase.
+
+    Preseason and all-star games are skipped. Live features are used (team lineups
+    from the ELO state, no future box score). For each game the prediction is
+    upserted on game_id and its SHAP rows are replaced (delete-then-insert top 10).
+
+    Args:
+        date:     ET date 'YYYY-MM-DD' (defaults to today, Eastern time).
+        dry_run:  print instead of writing to Supabase.
+        schedule: pre-fetched CDN schedule dict (fetched from the CDN if None).
+        db:       Supabase client (created from env when None and not dry_run).
+
+    Returns the list of prediction rows (empty when there are no games).
+    """
+    from pipeline import nba_cdn
+    from pipeline.features import build_feature_matrix
+
+    et_date = date or _today_et()
+    # Only predict stateful games that have not tipped off yet (gameStatus 1 =
+    # scheduled). Predicting a live/final game would let a manual re-run rewrite a
+    # pick after the fact.
+    games = [g for g in nba_cdn.games_for_date(et_date, schedule=schedule)
+             if nba_cdn.is_stateful(g["game_id"]) and g["game_status"] == 1]
+
+    if not games:
+        logger.info("No unstarted games to predict on %s.", et_date)
+        return []
+
+    logger.info("Predicting %d game(s) on %s ...", len(games), et_date)
+
+    game_log_df     = _load_game_logs()
+    season          = _date_to_season(pd.to_datetime(et_date))
+    player_stats_df = _load_player_stats(season)
+    prev_stats_df   = _load_player_stats(_prev_season(season))
+    model_bundle    = _load_model()
+
+    if not dry_run and db is None:
+        db = _get_supabase()
+
+    results: list[dict] = []
+    for g in games:
+        # Never overwrite a prediction that has already been graded (guards manual
+        # re-runs after a game has been played).
+        if not dry_run:
+            graded = (db.table("predictions").select("actual_winner")
+                        .eq("game_id", g["game_id"]).execute().data)
+            if graded and graded[0].get("actual_winner") is not None:
+                logger.info("  %s already graded — leaving prediction untouched", g["game_id"])
+                continue
+
+        home_id = str(g["home_team_id"])
+        away_id = str(g["away_team_id"])
+        home_ab = g["home_tricode"]
+        away_ab = g["away_tricode"]
+
+        feats = build_feature_matrix(
+            game_id         = g["game_id"],
+            home_team_id    = home_id,
+            away_team_id    = away_id,
+            game_date       = et_date,
+            season          = season,
+            game_log_df     = game_log_df,
+            player_stats_df = player_stats_df,
+            use_current_elo = True,
+            prev_player_stats_df = prev_stats_df,
+        )
+
+        home_win_prob = round(_predict_proba(model_bundle, feats), 4)
+        away_win_prob = round(1 - home_win_prob, 4)
+        is_home_pick  = home_win_prob >= 0.5
+
+        row = {
+            "game_id":          g["game_id"],
+            "game_date":        et_date,
+            "game_time_utc":    g["game_time_utc"],
+            "home_team":        home_ab,
+            "away_team":        away_ab,
+            "home_team_id":     home_id,
+            "away_team_id":     away_id,
+            "predicted_winner": "home" if is_home_pick else "away",
+            "predicted_team":   home_ab if is_home_pick else away_ab,
+            "home_win_prob":    home_win_prob,
+            "away_win_prob":    away_win_prob,
+            "confidence":       home_win_prob if is_home_pick else away_win_prob,
+        }
+        shap_pairs = _shap_top_features(model_bundle, feats, n=10)
+
+        if dry_run:
+            logger.info(
+                "  %s @ %s  →  %s (%.1f%%)  | elo_general_diff=%.1f",
+                away_ab, home_ab, row["predicted_team"], row["confidence"] * 100,
+                feats.get("elo_general_diff", 0.0),
+            )
+        else:
+            resp = db.table("predictions").upsert(row, on_conflict="game_id").execute()
+            pred_id = resp.data[0]["id"]
+            db.table("shap_values").delete().eq("prediction_id", pred_id).execute()
+            if shap_pairs:
+                db.table("shap_values").insert([
+                    {
+                        "prediction_id": pred_id,
+                        "feature_name":  feat,
+                        "shap_value":    round(float(val), 6),
+                        "feature_value": round(float(feats.get(feat, 0.0)), 4),
+                    }
+                    for feat, val in shap_pairs
+                ]).execute()
+
+        results.append(row)
+
+    logger.info("Predicted %d game(s) on %s.", len(results), et_date)
+    return results
 
 
 # ---------------------------------------------------------------------------

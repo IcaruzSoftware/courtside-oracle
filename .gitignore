@@ -218,8 +218,15 @@ __marimo__/
 .streamlit/secrets.toml
 
 # Courtside Oracle — generated files (regenerate locally, do not commit)
-src/data/raw/
-src/data/processed/
+# NOTE: ignore the *contents* of the data dirs (dir/*), not the dirs themselves,
+# so the committed "live state" files below can be re-included with `!`.
+# (git cannot re-include a file whose parent directory is itself ignored.)
+src/data/raw/*
+src/data/processed/*
+!src/data/raw/game_log_*.csv
+!src/data/raw/player_season_stats_*.csv
+!src/data/processed/player_elo_current.parquet
+!src/data/processed/player_elo_recent.parquet
 src/models/*.pkl
 !src/models/xgb_model.pkl
 
@@ -229,7 +236,3 @@ web/node_modules/
 web/.env.local
 web/out/
 !web/lib/
-
-# Keep the ELO snapshot (needed by GitHub Actions for predictions)
-!src/data/processed/player_elo_current.parquet
-!src/data/processed/feature_importance.csv

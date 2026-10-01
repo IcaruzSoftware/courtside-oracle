@@ -66,6 +66,8 @@ PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
 INITIAL_ELO = 1000.0
 MIN_MINUTES = 10.0      # minimum minutes to qualify for ranking in a game
+RECENT_N    = 11        # pre-game snapshots kept per player in the "recent" state file
+                        # (the form feature looks back up to 10 games → needs 11 rows)
 
 SKILLS = [
     "scoring",
@@ -76,6 +78,10 @@ SKILLS = [
     "hustle",
     "three_point",
 ]
+
+HISTORY_PATH = PROCESSED_DIR / "player_elo.parquet"          # full history (not committed)
+CURRENT_PATH = PROCESSED_DIR / "player_elo_current.parquet"  # committed live state (post-game)
+RECENT_PATH  = PROCESSED_DIR / "player_elo_recent.parquet"   # committed live state (pre-game tail)
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +161,136 @@ def load_game_players(game_id: str) -> pd.DataFrame | None:
         df = df.merge(track[track_cols], on="personId", how="left")
 
     df["personId"] = df["personId"].astype(str)
+    return df
+
+
+# ---------------------------------------------------------------------------
+# CDN box-score adapter
+# ---------------------------------------------------------------------------
+#
+# The daily pipeline reads box scores from cdn.nba.com's liveData feed, which
+# carries only basic counting stats (no advanced or tracking box score). This
+# adapter derives the advanced components ELO needs from those basics so the CDN
+# feed produces the SAME frame shape as load_game_players():
+#
+#   trueShootingPercentage = PTS / (2 · (FGA + 0.44 · FTA))
+#   assistToTurnover       = AST / TO
+#   reboundPercentage      = 100 · TRB · (TeamMin/5) / (Min · (TeamTRB + OppTRB))
+#   PIE                    = player game-impact numerator / game total
+#
+# defensiveRating and the tracking stats (speed/distance/touches) are absent —
+# compute_skill_scores already falls back gracefully (_col median-fill for
+# defensive rating; hustle skipped when tracking columns are missing).
+
+def _parse_iso_minutes(value) -> float:
+    """Parse an ISO-8601 duration like 'PT39M12.00S' to float minutes."""
+    if value is None:
+        return 0.0
+    s = str(value).strip()
+    if not s.startswith("PT"):
+        return _parse_minutes(s)
+    mins = secs = 0.0
+    num = ""
+    for ch in s[2:]:
+        if ch.isdigit() or ch == ".":
+            num += ch
+        elif ch == "M":
+            mins = float(num) if num else 0.0
+            num = ""
+        elif ch == "S":
+            secs = float(num) if num else 0.0
+            num = ""
+    return mins + secs / 60.0
+
+
+def _pie_numerator(s: dict) -> float:
+    """Player Impact Estimate numerator from basic counting stats."""
+    return (
+        float(s.get("points", 0))
+        + float(s.get("fieldGoalsMade", 0)) + float(s.get("freeThrowsMade", 0))
+        - float(s.get("fieldGoalsAttempted", 0)) - float(s.get("freeThrowsAttempted", 0))
+        + float(s.get("reboundsDefensive", 0)) + 0.5 * float(s.get("reboundsOffensive", 0))
+        + float(s.get("assists", 0)) + float(s.get("steals", 0))
+        + 0.5 * float(s.get("blocks", 0))
+        - float(s.get("foulsPersonal", 0)) - float(s.get("turnovers", 0))
+    )
+
+
+def load_cdn_game_players(game: dict | None) -> pd.DataFrame | None:
+    """
+    Build a per-player DataFrame from one cdn.nba.com liveData box score.
+
+    Args:
+        game: the ``game`` sub-dict of a boxscore JSON (both teams' ``players``).
+
+    Returns a frame matching load_game_players()'s columns (personId, teamId,
+    minutes_float, plus the counting/derived stats compute_skill_scores reads),
+    or None if the box score is missing or has no player rows.
+    """
+    if not game:
+        return None
+
+    teams = [game.get("homeTeam", {}), game.get("awayTeam", {})]
+    if not any(t.get("players") for t in teams):
+        return None
+
+    # Team-level rebound totals + minutes, for reboundPercentage.
+    team_reb: dict[int, float] = {}
+    team_min: dict[int, float] = {}
+    for t in teams:
+        tid = int(t.get("teamId", 0))
+        reb = mins = 0.0
+        for p in t.get("players", []):
+            st = p.get("statistics", {}) or {}
+            reb += float(st.get("reboundsTotal", 0))
+            mins += _parse_iso_minutes(st.get("minutes"))
+        team_reb[tid] = reb
+        team_min[tid] = mins
+    total_reb = sum(team_reb.values())
+
+    rows: list[dict] = []
+    for t in teams:
+        tid = int(t.get("teamId", 0))
+        opp_reb = total_reb - team_reb.get(tid, 0.0)
+        for p in t.get("players", []):
+            st = p.get("statistics", {}) or {}
+            mp  = _parse_iso_minutes(st.get("minutes"))
+            fga = float(st.get("fieldGoalsAttempted", 0))
+            fta = float(st.get("freeThrowsAttempted", 0))
+            pts = float(st.get("points", 0))
+            ast = float(st.get("assists", 0))
+            tov = float(st.get("turnovers", 0))
+            trb = float(st.get("reboundsTotal", 0))
+
+            tsa = fga + 0.44 * fta
+            ts  = pts / (2.0 * tsa) if tsa > 0 else 0.0
+            a2t = ast / tov if tov > 0 else ast
+            denom = mp * (team_reb.get(tid, 0.0) + opp_reb)
+            reb_pct = (100.0 * trb * (team_min.get(tid, 0.0) / 5.0) / denom) if denom > 0 else 0.0
+
+            rows.append({
+                "personId":                str(p.get("personId")),
+                "teamId":                  tid,
+                "minutes_float":           mp,
+                "points":                  pts,
+                "assists":                 ast,
+                "steals":                  float(st.get("steals", 0)),
+                "blocks":                  float(st.get("blocks", 0)),
+                "turnovers":               tov,
+                "reboundsTotal":           trb,
+                "threePointersMade":       float(st.get("threePointersMade", 0)),
+                "threePointersAttempted":  float(st.get("threePointersAttempted", 0)),
+                "threePointersPercentage": float(st.get("threePointersPercentage", 0) or 0.0),
+                "trueShootingPercentage":  ts,
+                "assistToTurnover":        a2t,
+                "reboundPercentage":       reb_pct,
+                "_pie_num":                _pie_numerator(st),
+            })
+
+    df = pd.DataFrame(rows)
+    game_num = df["_pie_num"].sum()
+    df["PIE"] = df["_pie_num"] / game_num if game_num else 0.0
+    df = df.drop(columns=["_pie_num"])
     return df
 
 
@@ -332,104 +468,256 @@ def build_game_date_index() -> pd.DataFrame:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def build_elo(force: bool = False) -> pd.DataFrame:
+HISTORY_COLS = (
+    ["game_id", "game_date", "player_id", "pre_general_elo"]
+    + [f"pre_{s}_elo" for s in SKILLS]
+)
+
+
+def _process_game(elo, meta, game_id, game_date, players_df, records) -> bool:
+    """
+    Apply one game to the live ELO state, in place.
+
+    Snapshots each qualifying player's PRE-game ELO into ``records`` (identical to
+    the historical layout), records each player's post-game team + date into
+    ``meta``, then updates ``elo`` with the game's zero-sum skill deltas.
+
+    Shared by both build_elo (stats box scores) and update_elo (CDN box scores).
+    Returns True if the game contributed (had qualifying players), else False.
+    """
+    if players_df is None or players_df.empty:
+        return False
+
+    df = players_df[players_df["minutes_float"] >= MIN_MINUTES].copy()
+    if df.empty:
+        return False
+
+    # ── Snapshot PRE-game ELO for every qualifying player ────────────────────
+    for pid in df["personId"].unique():
+        player_elo = elo[pid]
+        rec = {
+            "game_id":         game_id,
+            "game_date":       game_date,
+            "player_id":       pid,
+            "pre_general_elo": sum(player_elo[s] for s in SKILLS),
+        }
+        for skill in SKILLS:
+            rec[f"pre_{skill}_elo"] = player_elo[skill]
+        records.append(rec)
+
+    # ── Compute skill scores ─────────────────────────────────────────────────
+    # Deduplicate personId — a player traded same-day can appear for both teams
+    # in one game file. Keep the entry with the most minutes.
+    df = compute_skill_scores(df)
+    df = (df.sort_values("minutes_float", ascending=False)
+            .drop_duplicates("personId", keep="first")
+            .set_index("personId"))
+
+    # ── Post-game team assignment (for live-lineup building) ──────────────────
+    if "teamId" in df.columns:
+        for pid, tid in df["teamId"].items():
+            meta[pid] = {"team_id": int(tid), "last_game_date": game_date}
+
+    # ── For each skill: rank → delta → update ELO ────────────────────────────
+    for skill in SKILLS:
+        score_col = f"score_{skill}"
+        if score_col not in df.columns:
+            continue
+        deltas = compute_deltas(df[score_col], df["minutes_float"])
+        for pid, delta in deltas.items():
+            if pd.notna(delta):
+                elo[pid][skill] = elo[pid][skill] + float(delta)
+
+    return True
+
+
+def _tail_recent(records: list[dict]) -> pd.DataFrame:
+    """Return the last RECENT_N pre-game snapshots per player, chronologically."""
+    if not records:
+        return pd.DataFrame(columns=HISTORY_COLS)
+    df = pd.DataFrame(records)[HISTORY_COLS]
+    df = (df.sort_values("game_date")
+            .groupby("player_id", group_keys=False)
+            .tail(RECENT_N)
+            .reset_index(drop=True))
+    return df
+
+
+def _write_state(elo, meta, records) -> pd.DataFrame:
+    """Write the two committed live-state files (post-game current + recent tail)."""
+    cur_rows = []
+    for pid, skills in elo.items():
+        m = meta.get(pid, {})
+        row = {
+            "player_id":      pid,
+            "team_id":        m.get("team_id"),
+            "last_game_date": m.get("last_game_date"),
+            "general_elo":    sum(skills[s] for s in SKILLS),
+        }
+        for s in SKILLS:
+            row[f"{s}_elo"] = skills[s]
+        cur_rows.append(row)
+
+    current = pd.DataFrame(cur_rows)
+    current["last_game_date"] = pd.to_datetime(current["last_game_date"])
+    current = current.sort_values("player_id").reset_index(drop=True)
+    current.to_parquet(CURRENT_PATH, index=False)
+    logger.info("Saved current ELO (post-game): %d players → %s", len(current), CURRENT_PATH)
+
+    recent = _tail_recent(records)
+    recent.to_parquet(RECENT_PATH, index=False)
+    logger.info("Saved recent ELO snapshots: %d rows → %s", len(recent), RECENT_PATH)
+    return current
+
+
+def _new_elo_state():
+    return defaultdict(lambda: {s: INITIAL_ELO for s in SKILLS}), {}
+
+
+def build_elo(force: bool = False, loader=load_game_players, game_index=None) -> pd.DataFrame:
     """
     Process all games chronologically and compute the full player ELO history.
 
+    Also writes the two committed live-state files (player_elo_current.parquet with
+    post-game ELO + team_id + last_game_date, and player_elo_recent.parquet).
+
+        python src/pipeline/elo.py --force
+
+    rebuilds everything from the box scores in data/raw/.
+
     Args:
-        force: Reprocess and overwrite even if output already exists.
+        force:      Reprocess and overwrite even if the history file exists.
+        loader:     game_id -> players DataFrame (defaults to the stats.nba.com
+                    box-score loader; the CDN adapter can be injected for tests).
+        game_index: optional (GAME_ID, GAME_DATE) frame; built from the raw game
+                    logs when omitted.
 
     Returns:
         DataFrame with pre-game ELO snapshots (one row per player per game).
     """
-    out_path = PROCESSED_DIR / "player_elo.parquet"
+    if game_index is None:
+        if HISTORY_PATH.exists() and not force:
+            logger.info("ELO already built — loading from %s", HISTORY_PATH)
+            return pd.read_parquet(HISTORY_PATH)
+        game_index = build_game_date_index()
 
-    if out_path.exists() and not force:
-        logger.info("ELO already built — loading from %s", out_path)
-        return pd.read_parquet(out_path)
-
-    game_index = build_game_date_index()
     logger.info("Building ELO across %d games", len(game_index))
 
-    # Live ELO state: player_id → {skill → float}
-    elo: dict[str, dict[str, float]] = defaultdict(
-        lambda: {s: INITIAL_ELO for s in SKILLS}
-    )
-
+    elo, meta = _new_elo_state()
     records: list[dict] = []
 
     for _, row in tqdm(game_index.iterrows(), total=len(game_index), desc="ELO  games"):
         game_id   = str(row["GAME_ID"]).zfill(10)
         game_date = row["GAME_DATE"]
-
-        df = load_game_players(game_id)
-        if df is None or df.empty:
-            continue
-
-        # Keep only players who qualify (>= MIN_MINUTES)
-        df = df[df["minutes_float"] >= MIN_MINUTES].copy()
-        if df.empty:
-            continue
-
-        # ── Snapshot PRE-game ELO for every qualifying player ────────────────
-        for pid in df["personId"].unique():
-            player_elo = elo[pid]
-            rec = {
-                "game_id":        game_id,
-                "game_date":      game_date,
-                "player_id":      pid,
-                "pre_general_elo": sum(player_elo[s] for s in SKILLS),
-            }
-            for skill in SKILLS:
-                rec[f"pre_{skill}_elo"] = player_elo[skill]
-            records.append(rec)
-
-        # ── Compute skill scores ──────────────────────────────────────────────
-        # Deduplicate personId — a player traded same-day can appear for both
-        # teams in one game file. Keep the entry with the most minutes.
-        df = compute_skill_scores(df)
-        df = (df.sort_values("minutes_float", ascending=False)
-                .drop_duplicates("personId", keep="first")
-                .set_index("personId"))
-
-        # ── For each skill: rank → delta → update ELO ────────────────────────
-        for skill in SKILLS:
-            score_col = f"score_{skill}"
-            if score_col not in df.columns:
-                continue
-
-            deltas = compute_deltas(df[score_col], df["minutes_float"])
-
-            for pid, delta in deltas.items():
-                if pd.notna(delta):
-                    elo[pid][skill] = elo[pid][skill] + float(delta)
+        _process_game(elo, meta, game_id, game_date, loader(game_id), records)
 
     if not records:
         raise RuntimeError("No ELO records generated — verify box score files exist")
 
-    result = pd.DataFrame(records)
+    result = pd.DataFrame(records)[HISTORY_COLS]
+    result.to_parquet(HISTORY_PATH, index=False)
+    logger.info("Saved ELO history: %d records → %s", len(result), HISTORY_PATH)
 
-    # Enforce column order
-    ordered_cols = (
-        ["game_id", "game_date", "player_id", "pre_general_elo"]
-        + [f"pre_{s}_elo" for s in SKILLS]
-    )
-    result = result[ordered_cols]
-
-    result.to_parquet(out_path, index=False)
-    logger.info("Saved ELO history: %d records → %s", len(result), out_path)
-
-    # Current (most recent) ELO per player — used for prediction on new games
-    current = (
-        result.sort_values("game_date")
-              .groupby("player_id", as_index=False)
-              .last()
-    )
-    current_path = PROCESSED_DIR / "player_elo_current.parquet"
-    current.to_parquet(current_path, index=False)
-    logger.info("Saved current ELO: %d players → %s", len(current), current_path)
-
+    _write_state(elo, meta, records)
     return result
+
+
+def _load_state():
+    """Load the ELO dict + team/date meta + recent pre-game records from the state files."""
+    elo, meta = _new_elo_state()
+    if CURRENT_PATH.exists():
+        cur = pd.read_parquet(CURRENT_PATH)
+        cur["player_id"] = cur["player_id"].astype(str)
+        for _, r in cur.iterrows():
+            pid = r["player_id"]
+            elo[pid] = {s: float(r[f"{s}_elo"]) for s in SKILLS}
+            tid = r["team_id"]
+            meta[pid] = {
+                "team_id":        int(tid) if pd.notna(tid) else None,
+                "last_game_date": r["last_game_date"],
+            }
+    records: list[dict] = []
+    if RECENT_PATH.exists():
+        rec = pd.read_parquet(RECENT_PATH)
+        rec["player_id"] = rec["player_id"].astype(str)
+        records = rec.to_dict("records")
+    return elo, meta, records
+
+
+def _default_cdn_loader(game_id: str):
+    from pipeline.nba_cdn import fetch_boxscore
+    return load_cdn_game_players(fetch_boxscore(game_id))
+
+
+def update_elo(games, loader=None) -> pd.DataFrame:
+    """
+    Incrementally continue the saved ELO state with new games (idempotent).
+
+    Uses the exact same algorithm as build_elo, resuming from the committed state
+    files. Games already reflected in player_elo_recent.parquet are skipped, so
+    re-running with the same games is a no-op.
+
+    Args:
+        games:  iterable of (game_id, game_date) — applied in chronological order.
+        loader: game_id -> players DataFrame (defaults to the CDN adapter).
+
+    Returns the refreshed post-game current-state DataFrame.
+    """
+    if loader is None:
+        loader = _default_cdn_loader
+
+    elo, meta, records = _load_state()
+    applied = {str(r["game_id"]).zfill(10) for r in records}
+
+    ordered = sorted(
+        ((str(g).zfill(10), pd.to_datetime(d)) for g, d in games),
+        key=lambda x: (x[1], x[0]),
+    )
+
+    n_new = 0
+    for game_id, game_date in ordered:
+        if game_id in applied:
+            logger.info("update_elo: %s already applied — skipping", game_id)
+            continue
+        if _process_game(elo, meta, game_id, game_date, loader(game_id), records):
+            applied.add(game_id)
+            n_new += 1
+        else:
+            logger.info("update_elo: %s had no box score / qualifying players", game_id)
+
+    current = _write_state(elo, meta, records)
+    logger.info("update_elo: applied %d new game(s); state now %d players", n_new, len(current))
+    return current
+
+
+def update_team_assignments(games, loader=None) -> pd.DataFrame:
+    """
+    Refresh only player -> team assignment (team_id + last_game_date) from games,
+    without changing any ELO values or the recent snapshots. Used for preseason
+    games, which set the current-season roster but must not affect skill ELO.
+    """
+    if loader is None:
+        loader = _default_cdn_loader
+
+    elo, meta, records = _load_state()
+    for game_id, game_date in games:
+        frame = loader(game_id)
+        if frame is None or frame.empty or "teamId" not in frame.columns:
+            continue
+        gd = pd.to_datetime(game_date)
+        df = frame[frame["minutes_float"] >= MIN_MINUTES]
+        for _, r in df.iterrows():
+            pid = str(r["personId"])
+            existing = meta.get(pid)
+            # Only move a player's team forward in time — never let an older game
+            # (e.g. a preseason game in the same scan window) overwrite a newer one.
+            if existing and existing.get("last_game_date") is not None \
+                    and gd < pd.to_datetime(existing["last_game_date"]):
+                continue
+            _ = elo[pid]  # ensure the player exists in the state (defaults to 1000)
+            meta[pid] = {"team_id": int(r["teamId"]), "last_game_date": gd}
+
+    return _write_state(elo, meta, records)
 
 
 # ---------------------------------------------------------------------------

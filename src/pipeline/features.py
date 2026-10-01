@@ -47,8 +47,10 @@ _ELO_INITIAL = 1000.0
 
 _elo_history:   pd.DataFrame | None = None
 _elo_current:   pd.DataFrame | None = None
+_elo_recent:    pd.DataFrame | None = None
 _elo_by_game:   dict | None = None   # game_id  → sub-DataFrame (O(1) lookup)
 _elo_by_player: dict | None = None   # player_id → sorted sub-DataFrame (O(1) lookup)
+_elo_recent_by_player: dict | None = None   # live-mode form: player_id → recent snapshots
 
 
 def _get_elo_history() -> pd.DataFrame:
@@ -94,6 +96,78 @@ def _get_elo_by_player() -> dict:
     return _elo_by_player
 
 
+def _get_elo_recent() -> pd.DataFrame:
+    """Live-mode source for the form feature: last-N pre-game snapshots per player."""
+    global _elo_recent
+    if _elo_recent is None:
+        p = PROCESSED_DIR / "player_elo_recent.parquet"
+        if not p.exists():
+            raise FileNotFoundError("player_elo_recent.parquet not found — run elo.py first")
+        _elo_recent = pd.read_parquet(p)
+        _elo_recent["player_id"] = _elo_recent["player_id"].astype(str)
+    return _elo_recent
+
+
+def _get_elo_recent_by_player() -> dict:
+    """Dict of player_id → recent pre-game snapshots sorted by date (live form feature)."""
+    global _elo_recent_by_player
+    if _elo_recent_by_player is None:
+        df = _get_elo_recent()
+        _elo_recent_by_player = {
+            pid: sub.sort_values("game_date").reset_index(drop=True)
+            for pid, sub in df.groupby("player_id")
+        }
+    return _elo_recent_by_player
+
+
+# ---------------------------------------------------------------------------
+# Live-mode helpers (season derivation, PPG weights, roster from ELO state)
+# ---------------------------------------------------------------------------
+
+def _season_of(date) -> str:
+    """NBA season string for a date (Oct–Sep season boundary), e.g. Mar 2024 → '2023-24'."""
+    ts = pd.to_datetime(date)
+    y = ts.year
+    return f"{y}-{str(y + 1)[2:]}" if ts.month >= 10 else f"{y - 1}-{str(y)[2:]}"
+
+
+def _prev_season(season: str) -> str:
+    start = int(season[:4])
+    return f"{start - 1}-{str(start)[2:]}"
+
+
+def _build_ppg_lookup(*stats_frames) -> dict[str, float]:
+    """player_id → PPG. Later frames override earlier ones (pass previous season first)."""
+    ppg: dict[str, float] = {}
+    for df in stats_frames:
+        if df is not None and not df.empty and "PLAYER_ID" in df.columns:
+            for _, row in df.iterrows():
+                ppg[str(int(row["PLAYER_ID"]))] = max(float(row.get("PTS", 5.0)), 1.0)
+    return ppg
+
+
+def _live_team_lineup(current_elo: pd.DataFrame, team_id: str, season: str) -> pd.DataFrame:
+    """
+    Players making up a team's live lineup, taken from the ELO state.
+
+    A player belongs to the team when their latest appearance (the team_id stored
+    in the post-game state) is that team. Current-season appearances are preferred;
+    if the team has fewer than 8 of those (e.g. early in the season, before rosters
+    have played enough), we add previous-season appearances too. Players whose latest
+    game is older than the previous season (i.e. retired / long gone) are excluded.
+    """
+    same_team = current_elo[
+        pd.to_numeric(current_elo["team_id"], errors="coerce") == int(team_id)
+    ]
+    if same_team.empty:
+        return same_team
+    seasons = same_team["last_game_date"].apply(_season_of)
+    in_season = same_team[seasons == season]
+    if len(in_season) >= 8:
+        return in_season
+    return same_team[seasons.isin({season, _prev_season(season)})]
+
+
 # ---------------------------------------------------------------------------
 # Box score helpers
 # ---------------------------------------------------------------------------
@@ -136,12 +210,65 @@ def _load_team_player_ids(game_id: str, team_id: str) -> set[str]:
 # 1. ELO features
 # ---------------------------------------------------------------------------
 
+def _get_elo_features_live(
+    home_team_id: str,
+    away_team_id: str,
+    season: str,
+    player_stats_df: pd.DataFrame,
+    prev_player_stats_df: pd.DataFrame | None,
+) -> dict:
+    """
+    Live-prediction ELO features (no future box score exists yet).
+
+    Each team's lineup is read from the ELO state (players whose latest appearance
+    was for that team) instead of from the game's box score, and each team's
+    composite ELO is the PPG-weighted average of those players' post-game ELOs.
+    PPG weights come from the current season, falling back to the previous season
+    for players without a current-season line yet.
+    """
+    current = _get_elo_current()
+    ppg_lookup = _build_ppg_lookup(prev_player_stats_df, player_stats_df)
+    all_skills = ELO_SKILLS + ["general"]
+
+    def _weighted_team_elo(team_id: str) -> dict[str, float]:
+        lineup = _live_team_lineup(current, team_id, season)
+        if lineup.empty:
+            return {s: _ELO_INITIAL for s in all_skills}
+
+        weights: list[float] = []
+        vals: dict[str, list] = {s: [] for s in all_skills}
+        for _, row in lineup.iterrows():
+            pid = str(row["player_id"])
+            weights.append(ppg_lookup.get(pid, 5.0))
+            for s in ELO_SKILLS:
+                vals[s].append(float(row[f"{s}_elo"]))
+            vals["general"].append(float(row["general_elo"]))
+
+        total_w = sum(weights)
+        return {
+            s: sum(v * w for v, w in zip(vals[s], weights)) / total_w
+            for s in all_skills
+        }
+
+    home_elo = _weighted_team_elo(home_team_id)
+    away_elo = _weighted_team_elo(away_team_id)
+
+    features: dict = {}
+    for s in all_skills:
+        features[f"home_{s}_elo"] = home_elo[s]
+        features[f"away_{s}_elo"] = away_elo[s]
+        features[f"elo_{s}_diff"] = home_elo[s] - away_elo[s]
+    return features
+
+
 def get_elo_features(
     game_id: str,
     home_team_id: str,
     away_team_id: str,
     player_stats_df: pd.DataFrame,
     use_current: bool = False,
+    season: str | None = None,
+    prev_player_stats_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Compute usage-weighted team ELO per skill + home/away differentials.
@@ -155,16 +282,21 @@ def get_elo_features(
         home_team_id:    NBA team ID for home team
         away_team_id:    NBA team ID for away team
         player_stats_df: Season player stats (for PPG weights)
-        use_current:     True for live predictions — uses player_elo_current
-                         instead of the historical snapshot for this game_id
+        use_current:     True for live predictions — builds each team's lineup from
+                         the ELO state (post-game player_elo_current) instead of
+                         from this game's box score, which does not exist yet.
+        season:          current season string (live mode only)
+        prev_player_stats_df: previous-season player stats (live PPG fallback)
 
     Returns features:
         home_{skill}_elo, away_{skill}_elo, elo_{skill}_diff  × 8 skills
     """
     if use_current:
-        game_elos = _get_elo_current()
-    else:
-        game_elos = _get_elo_by_game().get(game_id, pd.DataFrame())
+        return _get_elo_features_live(
+            home_team_id, away_team_id, season, player_stats_df, prev_player_stats_df
+        )
+
+    game_elos = _get_elo_by_game().get(game_id, pd.DataFrame())
 
     # player_id → {skill: elo}
     elo_lookup: dict[str, dict] = {}
@@ -402,6 +534,11 @@ def get_player_availability_features(
     Returns: star_player_out (1 if 20+ PPG player is inactive),
              missing_ppg (total PPG of inactive players),
              availability_score (active PPG / total roster PPG, 0–1)
+
+    Live-mode note: there is no injury/inactives source for a game that has not been
+    played (the box-score summary file does not exist yet), so these features stay
+    neutral (star_player_out=0, missing_ppg=0, availability_score=1.0). Wire up an
+    injury feed here if per-game availability is wanted for live predictions.
     """
     inactive_ids = _load_inactive_ids(game_id, team_id)
 
@@ -483,6 +620,7 @@ def get_player_form_features(
     game_date: str,
     player_stats_df: pd.DataFrame,
     n_games: int = 10,
+    use_current: bool = False,
 ) -> dict:
     """
     Measure recent form of top players via ELO trajectory.
@@ -491,9 +629,12 @@ def get_player_form_features(
     their general ELO changed over the last n_games. A rising ELO means
     they've been outperforming peers recently.
 
+    In live mode (use_current) the trajectory is read from the small recent-snapshot
+    state file instead of the full ELO history (which is not shipped to the runner).
+
     Returns: top{1,2,3}_elo_trend, avg_top3_elo_trend
     """
-    elo_by_player = _get_elo_by_player()
+    elo_by_player = _get_elo_recent_by_player() if use_current else _get_elo_by_player()
 
     # Get top 3 players by PPG for this team
     if player_stats_df is None or player_stats_df.empty:
@@ -595,6 +736,7 @@ def build_feature_matrix(
     game_log_df: pd.DataFrame,
     player_stats_df: pd.DataFrame,
     use_current_elo: bool = False,
+    prev_player_stats_df: pd.DataFrame | None = None,
 ) -> dict[str, float]:
     """
     Build a single flat feature dict for one game, ready for XGBoost.
@@ -622,6 +764,7 @@ def build_feature_matrix(
         elo = get_elo_features(
             game_id, home_team_id, away_team_id,
             player_stats_df, use_current=use_current_elo,
+            season=season, prev_player_stats_df=prev_player_stats_df,
         )
         features.update(elo)
     except Exception as exc:
@@ -695,7 +838,8 @@ def build_feature_matrix(
     for prefix, team_id in [("home", home_team_id), ("away", away_team_id)]:
         try:
             form = get_player_form_features(
-                team_id, game_id, game_date, player_stats_df
+                team_id, game_id, game_date, player_stats_df,
+                use_current=use_current_elo,
             )
             features.update({f"{prefix}_{k}": v for k, v in form.items()})
         except Exception as exc:

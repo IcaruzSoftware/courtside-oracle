@@ -5,16 +5,19 @@ on:
     - cron: "0 12 * * *"   # 8:00 AM ET (12:00 UTC), after overnight games are final
   workflow_dispatch:
 
+permissions:
+  contents: write           # needed to commit the refreshed state files
+
 jobs:
   evaluate:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -22,22 +25,24 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Check results + update Supabase
+      - name: Evaluate results + update state (CDN box scores, incremental ELO)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python src/pipeline/evaluate.py
+        run: python src/scripts/daily_run.py --evaluate
 
-      - name: Collect new box scores + update ELOs
-        env:
-          PROXIES: ${{ secrets.PROXIES }}
-        run: python src/pipeline/update_season.py
-
-      - name: Commit updated ELO snapshot
+      - name: Commit updated state files if changed
         run: |
           git config user.name  "courtside-oracle[bot]"
           git config user.email "bot@courtside-oracle"
-          git add src/data/processed/player_elo_current.parquet
-          git add src/data/processed/player_elo_current.csv
-          git diff --cached --quiet || git commit -m "chore: daily ELO update [skip ci]"
-          git push || true
+          # `git add src/data/` stages only the committed state files — .gitignore
+          # ignores everything else under data/ (see .gitignore negations).
+          git add src/data/
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "chore: daily state update [skip ci]"
+            # Rebase onto any concurrent push so this push can't fail non-fast-forward.
+            git pull --rebase origin "$(git rev-parse --abbrev-ref HEAD)"
+            git push
+          fi

@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     game_id          TEXT NOT NULL UNIQUE,
     game_date        DATE NOT NULL,
+    game_time_utc    TIMESTAMPTZ,     -- scheduled tip-off (UTC), from the NBA schedule
     home_team        TEXT NOT NULL,   -- team abbreviation, e.g. "LAL"
     away_team        TEXT NOT NULL,
     home_team_id     TEXT,            -- NBA team ID for logo URL
@@ -76,3 +77,26 @@ CREATE TABLE IF NOT EXISTS model_metadata (
     notes               TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---------------------------------------------------------------------------
+-- Row Level Security — public SELECT only
+--
+-- The pipeline connects with the SERVICE-ROLE key, which bypasses RLS entirely
+-- (full read/write). These policies govern only the anon/public role used by the
+-- website: read-only, with no write policy (so no anon writes). See also
+-- migrations/001_game_time_and_rls.sql.
+-- ---------------------------------------------------------------------------
+ALTER TABLE predictions    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE shap_values    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE running_record ENABLE ROW LEVEL SECURITY;
+ALTER TABLE model_metadata ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "public read predictions"    ON predictions;
+DROP POLICY IF EXISTS "public read shap_values"    ON shap_values;
+DROP POLICY IF EXISTS "public read running_record" ON running_record;
+DROP POLICY IF EXISTS "public read model_metadata" ON model_metadata;
+
+CREATE POLICY "public read predictions"    ON predictions    FOR SELECT USING (true);
+CREATE POLICY "public read shap_values"    ON shap_values    FOR SELECT USING (true);
+CREATE POLICY "public read running_record" ON running_record FOR SELECT USING (true);
+CREATE POLICY "public read model_metadata" ON model_metadata FOR SELECT USING (true);

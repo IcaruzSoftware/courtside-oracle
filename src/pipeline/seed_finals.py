@@ -19,10 +19,11 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+import pandas as pd
 from supabase import create_client
 from pipeline.predict import (
     _load_game_logs, _load_player_stats, _team_id,
-    _predict_proba, _shap_top_features, _load_model,
+    _predict_proba, _shap_top_features, _load_model, _date_to_season,
 )
 from pipeline.features import build_feature_matrix
 
@@ -46,7 +47,8 @@ def main():
 
     logger.info("Loading data...")
     game_log_df     = _load_game_logs()
-    player_stats_df = _load_player_stats("2025-26")
+    finals_season   = _date_to_season(pd.to_datetime(FINALS[0][2]))
+    player_stats_df = _load_player_stats(finals_season)
     model_bundle    = _load_model()
 
     correct_count = 0
@@ -62,7 +64,7 @@ def main():
             home_team_id    = home_id,
             away_team_id    = away_id,
             game_date       = date,
-            season          = "2025-26",
+            season          = _date_to_season(pd.to_datetime(date)),
             game_log_df     = game_log_df,
             player_stats_df = player_stats_df,
             use_current_elo = False,

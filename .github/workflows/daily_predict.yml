@@ -11,12 +11,10 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          lfs: false
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -26,15 +24,6 @@ jobs:
 
       - name: Fetch today's schedule + predict
         env:
-          SUPABASE_URL:  ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY:  ${{ secrets.SUPABASE_KEY }}
-          PROXIES:       ${{ secrets.PROXIES }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python src/scripts/daily_run.py --predict
-
-      - name: Commit updated ELO snapshot if changed
-        run: |
-          git config user.name  "courtside-oracle[bot]"
-          git config user.email "bot@courtside-oracle"
-          git add src/data/processed/player_elo_current.parquet || true
-          git diff --cached --quiet || git commit -m "chore: update player ELO snapshot [skip ci]"
-          git push || true
