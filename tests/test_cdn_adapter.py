@@ -27,6 +27,13 @@ def test_true_shooting(finals_game):
     assert wemby.trueShootingPercentage == pytest_approx(0.448113)
 
 
+def test_player_name_from_cdn(finals_game):
+    df = load_cdn_game_players(finals_game)
+    assert "player_name" in df.columns
+    wemby = df[df.personId == "1641705"].iloc[0]
+    assert wemby.player_name == "Victor Wembanyama"
+
+
 def test_pie_sums_to_one(finals_game):
     df = load_cdn_game_players(finals_game)
     assert df.PIE.sum() == pytest_approx(1.0)

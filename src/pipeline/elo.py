@@ -124,12 +124,20 @@ def _load_player_dataset(game_id: str, endpoint: str) -> pd.DataFrame | None:
     return pd.DataFrame(ds["data"], columns=ds["headers"])
 
 
+def _name_column(df: pd.DataFrame) -> pd.Series:
+    """Build 'First Last' from a frame's firstName/familyName columns (blank-safe)."""
+    def col(name):
+        return df[name].fillna("").astype(str) if name in df.columns else pd.Series("", index=df.index)
+    return (col("firstName") + " " + col("familyName")).str.strip()
+
+
 def load_game_players(game_id: str) -> pd.DataFrame | None:
     """
     Merge traditional + advanced + tracking box scores for one game.
 
     Returns a single DataFrame with one row per player containing all stats
-    needed for ELO computation. Returns None if core data is missing.
+    needed for ELO computation (plus a human-readable player_name). Returns None
+    if core data is missing.
     """
     trad = _load_player_dataset(game_id, "traditional")
     adv  = _load_player_dataset(game_id, "advanced")
@@ -161,6 +169,7 @@ def load_game_players(game_id: str) -> pd.DataFrame | None:
         df = df.merge(track[track_cols], on="personId", how="left")
 
     df["personId"] = df["personId"].astype(str)
+    df["player_name"] = _name_column(df)
     return df
 
 
@@ -268,8 +277,10 @@ def load_cdn_game_players(game: dict | None) -> pd.DataFrame | None:
             denom = mp * (team_reb.get(tid, 0.0) + opp_reb)
             reb_pct = (100.0 * trb * (team_min.get(tid, 0.0) / 5.0) / denom) if denom > 0 else 0.0
 
+            name = p.get("name") or f"{p.get('firstName', '')} {p.get('familyName', '')}".strip()
             rows.append({
                 "personId":                str(p.get("personId")),
+                "player_name":             name,
                 "teamId":                  tid,
                 "minutes_float":           mp,
                 "points":                  pts,
@@ -469,7 +480,7 @@ def build_game_date_index() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 HISTORY_COLS = (
-    ["game_id", "game_date", "player_id", "pre_general_elo"]
+    ["game_id", "game_date", "player_id", "player_name", "pre_general_elo"]
     + [f"pre_{s}_elo" for s in SKILLS]
 )
 
@@ -492,6 +503,11 @@ def _process_game(elo, meta, game_id, game_date, players_df, records) -> bool:
     if df.empty:
         return False
 
+    name_by_pid = (
+        dict(zip(df["personId"], df["player_name"].fillna("").astype(str)))
+        if "player_name" in df.columns else {}
+    )
+
     # ── Snapshot PRE-game ELO for every qualifying player ────────────────────
     for pid in df["personId"].unique():
         player_elo = elo[pid]
@@ -499,6 +515,7 @@ def _process_game(elo, meta, game_id, game_date, players_df, records) -> bool:
             "game_id":         game_id,
             "game_date":       game_date,
             "player_id":       pid,
+            "player_name":     name_by_pid.get(pid, ""),
             "pre_general_elo": sum(player_elo[s] for s in SKILLS),
         }
         for skill in SKILLS:
@@ -516,7 +533,8 @@ def _process_game(elo, meta, game_id, game_date, players_df, records) -> bool:
     # ── Post-game team assignment (for live-lineup building) ──────────────────
     if "teamId" in df.columns:
         for pid, tid in df["teamId"].items():
-            meta[pid] = {"team_id": int(tid), "last_game_date": game_date}
+            name = name_by_pid.get(pid, "") or meta.get(pid, {}).get("player_name", "")
+            meta[pid] = {"team_id": int(tid), "last_game_date": game_date, "player_name": name}
 
     # ── For each skill: rank → delta → update ELO ────────────────────────────
     for skill in SKILLS:
@@ -550,6 +568,7 @@ def _write_state(elo, meta, records) -> pd.DataFrame:
         m = meta.get(pid, {})
         row = {
             "player_id":      pid,
+            "player_name":    m.get("player_name", ""),
             "team_id":        m.get("team_id"),
             "last_game_date": m.get("last_game_date"),
             "general_elo":    sum(skills[s] for s in SKILLS),
@@ -628,6 +647,7 @@ def _load_state():
     if CURRENT_PATH.exists():
         cur = pd.read_parquet(CURRENT_PATH)
         cur["player_id"] = cur["player_id"].astype(str)
+        has_name = "player_name" in cur.columns  # backward-compat with name-less state
         for _, r in cur.iterrows():
             pid = r["player_id"]
             elo[pid] = {s: float(r[f"{s}_elo"]) for s in SKILLS}
@@ -635,6 +655,7 @@ def _load_state():
             meta[pid] = {
                 "team_id":        int(tid) if pd.notna(tid) else None,
                 "last_game_date": r["last_game_date"],
+                "player_name":    (str(r["player_name"]) if has_name and pd.notna(r["player_name"]) else ""),
             }
     records: list[dict] = []
     if RECENT_PATH.exists():
@@ -706,6 +727,7 @@ def update_team_assignments(games, loader=None) -> pd.DataFrame:
             continue
         gd = pd.to_datetime(game_date)
         df = frame[frame["minutes_float"] >= MIN_MINUTES]
+        has_name = "player_name" in df.columns
         for _, r in df.iterrows():
             pid = str(r["personId"])
             existing = meta.get(pid)
@@ -715,7 +737,8 @@ def update_team_assignments(games, loader=None) -> pd.DataFrame:
                     and gd < pd.to_datetime(existing["last_game_date"]):
                 continue
             _ = elo[pid]  # ensure the player exists in the state (defaults to 1000)
-            meta[pid] = {"team_id": int(r["teamId"]), "last_game_date": gd}
+            name = (str(r["player_name"]) if has_name else "") or (existing or {}).get("player_name", "")
+            meta[pid] = {"team_id": int(r["teamId"]), "last_game_date": gd, "player_name": name}
 
     return _write_state(elo, meta, records)
 

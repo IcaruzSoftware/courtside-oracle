@@ -219,7 +219,8 @@ def tiny_state(tmp_path, monkeypatch, finals_game):
     # Minimal player season stats (PPG weights) for the players in the game.
     contribs = ds._player_contribs(finals_game)
     stats = pd.DataFrame(
-        [{"PLAYER_ID": int(pid), "TEAM_ID": tid, "GP": 1, "PTS": pts} for pid, tid, pts in contribs]
+        [{"PLAYER_ID": int(pid), "PLAYER_NAME": name, "TEAM_ID": tid, "GP": 1, "PTS": pts}
+         for pid, tid, pts, name in contribs]
     )
     stats.to_csv(raw / "player_season_stats_2025-26.csv", index=False)
 

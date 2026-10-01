@@ -133,18 +133,19 @@ def _game_log_rows(game: dict, game_id: str, game_date: str) -> list[dict]:
     ]
 
 
-def _player_contribs(game: dict) -> list[tuple[str, int, float]]:
-    """(player_id, team_id, points) for every player who logged minutes."""
+def _player_contribs(game: dict) -> list[tuple[str, int, float, str]]:
+    """(player_id, team_id, points, player_name) for every player who logged minutes."""
     from pipeline.elo import _parse_iso_minutes
 
-    out: list[tuple[str, int, float]] = []
+    out: list[tuple[str, int, float, str]] = []
     for team in (game["homeTeam"], game["awayTeam"]):
         tid = int(team["teamId"])
         for p in team.get("players", []):
             st = p.get("statistics", {}) or {}
             if _parse_iso_minutes(st.get("minutes")) <= 0:
                 continue
-            out.append((str(p["personId"]), tid, float(st.get("points", 0))))
+            name = p.get("name") or f"{p.get('firstName', '')} {p.get('familyName', '')}".strip()
+            out.append((str(p["personId"]), tid, float(st.get("points", 0)), name))
     return out
 
 
@@ -171,27 +172,28 @@ def _append_game_logs(rows_by_file: dict, dry_run: bool) -> None:
             logger.info("Wrote %s (%d rows)", path.name, len(combined))
 
 
-def _update_player_stats(season: str, contribs: list[tuple[str, int, float]], dry_run: bool) -> None:
+def _update_player_stats(season: str, contribs: list[tuple[str, int, float, str]], dry_run: bool) -> None:
     if not contribs:
         return
     path = RAW_DIR / f"player_season_stats_{season}.csv"
 
     agg: dict[int, list] = {}
-    for pid, tid, pts in contribs:
-        a = agg.setdefault(int(pid), [0.0, 0, tid])
+    for pid, tid, pts, name in contribs:
+        a = agg.setdefault(int(pid), [0.0, 0, tid, ""])
         a[0] += pts
         a[1] += 1
         a[2] = tid
+        a[3] = name or a[3]
 
     if path.exists():
         df = pd.read_csv(path)
         df["PLAYER_ID"] = df["PLAYER_ID"].astype(int)
         df = df.set_index("PLAYER_ID")
     else:
-        df = pd.DataFrame(columns=["TEAM_ID", "GP", "PTS"])
+        df = pd.DataFrame(columns=["PLAYER_NAME", "TEAM_ID", "GP", "PTS"])
         df.index.name = "PLAYER_ID"
 
-    for pid, (pts_sum, gp, tid) in agg.items():
+    for pid, (pts_sum, gp, tid, name) in agg.items():
         if pid in df.index and "GP" in df.columns and pd.notna(df.at[pid, "GP"]):
             old_gp  = float(df.at[pid, "GP"])
             old_ppg = float(df.at[pid, "PTS"])
@@ -199,10 +201,13 @@ def _update_player_stats(season: str, contribs: list[tuple[str, int, float]], dr
             df.at[pid, "GP"]      = new_gp
             df.at[pid, "PTS"]     = round((old_ppg * old_gp + pts_sum) / new_gp, 4)
             df.at[pid, "TEAM_ID"] = tid
+            if name:
+                df.at[pid, "PLAYER_NAME"] = name
         else:
-            df.loc[pid, "TEAM_ID"] = tid
-            df.loc[pid, "GP"]      = gp
-            df.loc[pid, "PTS"]     = round(pts_sum / gp, 4)
+            df.loc[pid, "PLAYER_NAME"] = name
+            df.loc[pid, "TEAM_ID"]     = tid
+            df.loc[pid, "GP"]          = gp
+            df.loc[pid, "PTS"]         = round(pts_sum / gp, 4)
 
     df = df.reset_index()
     if dry_run:

@@ -27,6 +27,21 @@ def test_game_log_append_idempotent(monkeypatch, tmp_path, finals_game):
     assert len(second) == 2
 
 
+def test_player_contribs_and_stats_carry_names(monkeypatch, tmp_path, finals_game):
+    raw = tmp_path / "raw"; raw.mkdir()
+    monkeypatch.setattr(ds, "RAW_DIR", raw)
+
+    contribs = ds._player_contribs(finals_game)
+    assert all(len(c) == 4 for c in contribs)
+    names = {pid: name for pid, _, _, name in contribs}
+    assert names["1641705"] == "Victor Wembanyama"
+
+    ds._update_player_stats("2025-26", contribs, dry_run=False)
+    df = pd.read_csv(raw / "player_season_stats_2025-26.csv")
+    assert "PLAYER_NAME" in df.columns
+    assert (df["PLAYER_NAME"] == "Victor Wembanyama").any()
+
+
 def _cdn_game(gid, home_tri, home_id, away_tri, away_id, hs, aw):
     def team(tri, tid, score):
         return {

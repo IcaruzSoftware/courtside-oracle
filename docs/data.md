@@ -23,7 +23,7 @@ else regenerates from a bootstrap or a daily run.
 | File(s) | Committed? | Written by | Columns the code reads |
 |---|---|---|---|
 | `game_log_regular_{season}.csv`, `game_log_playoffs_{season}.csv` | Yes | `bootstrap_data.py` (initial), `daily_state.py` (daily append) | `GAME_ID`, `GAME_DATE`, `TEAM_ID`, `TEAM_ABBREVIATION`, `MATCHUP`, `WL`, `PTS`, `PLUS_MINUS`, `AST`, `REB`, `TOV` |
-| `player_season_stats_{season}.csv` | Yes | `bootstrap_data.py` (initial), `daily_state.py` (daily update) | `PLAYER_ID`, `TEAM_ID`, `GP`, `PTS` |
+| `player_season_stats_{season}.csv` | Yes | `bootstrap_data.py` (initial), `daily_state.py` (daily update) | `PLAYER_ID`, `PLAYER_NAME`, `TEAM_ID`, `GP`, `PTS` (bootstrap files carry the full LeagueDashPlayerStats column set; `daily_state.py` fills these) |
 | `boxscore_traditional_{game_id}.json` | No | `bootstrap_data.py` / `collect.py` | `PlayerStats` dataset: `personId`, `minutes`, `points`, `assists`, `steals`, `blocks`, `reboundsTotal`, `turnovers`, `threePointersMade/Attempted/Percentage`, `teamId` |
 | `boxscore_advanced_{game_id}.json` | No | same | `PlayerStats`: `personId`, `defensiveRating`, `trueShootingPercentage`, `usagePercentage`, `assistToTurnover`, `reboundPercentage`, `PIE` |
 | `boxscore_tracking_{game_id}.json` | No | same | `PlayerStats`: `personId`, `speed`, `distance`, `touches` (absent pre-2016 or if the endpoint returned nothing — hustle skill is skipped for that game) |
@@ -70,17 +70,20 @@ feature work, not as something `elo.py` or `features.py` depends on today.
 | File | Committed? | Written by | Purpose |
 |---|---|---|---|
 | `player_elo.parquet` | **No** | `elo.py` (`build_elo`) | Full pre-game ELO history, one row per player per game. Used by `features.py` for historical/training features. |
-| `player_elo_current.parquet` | **Yes** | `elo.py` (`build_elo`, `update_elo`, `update_team_assignments`) | Post-game ELO per player + `team_id` + `last_game_date`. Live roster/ELO source. |
-| `player_elo_recent.parquet` | **Yes** | `elo.py` (`build_elo`, `update_elo`) | Last 11 pre-game ELO snapshots per player. Feeds the live "form" feature. |
+| `player_elo_current.parquet` | **Yes** | `elo.py` (`build_elo`, `update_elo`, `update_team_assignments`) | Post-game ELO per player + `player_name` + `team_id` + `last_game_date`. Live roster/ELO source. |
+| `player_elo_recent.parquet` | **Yes** | `elo.py` (`build_elo`, `update_elo`) | Last 11 pre-game ELO snapshots per player (incl. `player_name`). Feeds the live "form" feature. |
 | `feature_matrix.parquet` | No | `build_dataset.py` | One row per historical game, ~100 feature columns + `home_win` label. Training input. |
 | `train_metrics.json`, `feature_importance.csv` | No | `train.py` | Training run metrics / ranked feature importance. |
 | `shap_beeswarm.png`, `shap_summary.json` | No | `shap_export.py` | Global SHAP plots for a possible model-explainability subpage. **Not currently invoked by any script** (`train.py` doesn't call it, and `predict.py` computes its own top-10 SHAP inline via `_shap_top_features()` rather than `shap_export.export_shap_for_prediction()`). Would need to be run manually — see the old snippet this replaced in README history. |
 
 Full column list for `player_elo*.parquet`: `game_id`, `game_date`,
-`player_id`, `pre_general_elo` / `general_elo`, and
+`player_id`, `player_name`, `pre_general_elo` / `general_elo`, and
 `pre_{skill}_elo` / `{skill}_elo` for each of the 7 skills in
 [elo.md](elo.md). `player_elo_current.parquet` additionally has `team_id` and
-`last_game_date`.
+`last_game_date` (its columns are `player_id`, `player_name`, `team_id`,
+`last_game_date`, `general_elo`, `{skill}_elo`×7). `player_name` is a
+human-readable "First Last" for eyeballing the data; it carries no weight in the
+model.
 
 ## `src/models/`
 

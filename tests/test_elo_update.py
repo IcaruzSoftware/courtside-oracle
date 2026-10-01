@@ -91,6 +91,46 @@ def test_update_elo_is_idempotent(monkeypatch, tmp_path):
     pd.testing.assert_frame_equal(once[["player_id"] + ELO_COLS], twice[["player_id"] + ELO_COLS])
 
 
+def test_name_column_from_trad_fields():
+    df = pd.DataFrame({"firstName": ["Kent", None], "familyName": ["Bazemore", "Doe"]})
+    names = elo._name_column(df)
+    assert names.iloc[0] == "Kent Bazemore"
+    assert names.iloc[1] == "Doe"  # missing first name -> just the last, stripped
+
+
+def test_names_flow_to_state_files(monkeypatch, tmp_path):
+    _point_paths(monkeypatch, tmp_path)
+    frame = _frame(1)
+    frame["player_name"] = "Name " + frame["personId"]
+    index = pd.DataFrame({"GAME_ID": ["0022600001"], "GAME_DATE": [pd.Timestamp("2026-10-25")]})
+    elo.build_elo(force=True, loader=lambda g: frame.copy(), game_index=index)
+
+    cur = pd.read_parquet(elo.CURRENT_PATH)
+    rec = pd.read_parquet(elo.RECENT_PATH)
+    assert list(cur.columns)[:2] == ["player_id", "player_name"]
+    assert list(rec.columns)[:4] == ["game_id", "game_date", "player_id", "player_name"]
+    assert cur.set_index("player_id").loc["p00", "player_name"] == "Name p00"
+    assert (rec["player_name"] != "").all()
+
+
+def test_load_state_backward_compatible_without_name(monkeypatch, tmp_path):
+    _point_paths(monkeypatch, tmp_path)
+    # Build state, then strip player_name to simulate an older (name-less) state file.
+    idx = pd.DataFrame({"GAME_ID": ["0022600001"], "GAME_DATE": [pd.Timestamp("2026-10-20")]})
+    elo.build_elo(force=True, loader=lambda g: _frame(1), game_index=idx)
+    pd.read_parquet(elo.CURRENT_PATH).drop(columns=["player_name"]).to_parquet(elo.CURRENT_PATH, index=False)
+    pd.read_parquet(elo.RECENT_PATH).drop(columns=["player_name"]).to_parquet(elo.RECENT_PATH, index=False)
+
+    # update_elo must load the name-less state fine and fill names for the new game.
+    frame2 = _frame(2)
+    frame2["player_name"] = "N " + frame2["personId"]
+    elo.update_elo([("0022600002", "2026-10-27")], loader=lambda g: frame2.copy())
+
+    cur = pd.read_parquet(elo.CURRENT_PATH).set_index("player_id")
+    assert "player_name" in cur.columns
+    assert cur.loc["p00", "player_name"] == "N p00"
+
+
 def _mini(rows):
     return pd.DataFrame([{"personId": pid, "teamId": tid, "minutes_float": 20.0} for pid, tid in rows])
 

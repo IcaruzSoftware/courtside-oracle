@@ -208,15 +208,18 @@ data-dependent to commit. Stores the ELO snapshot BEFORE the game was
 processed — the correct value to use as a training feature, since it is what
 was known going into the game.
 
-Columns: `game_id`, `game_date`, `player_id`, `pre_general_elo`,
+Columns: `game_id`, `game_date`, `player_id`, `player_name`, `pre_general_elo`,
 `pre_scoring_elo`, `pre_playmaking_elo`, `pre_defense_elo`,
 `pre_rebounding_elo`, `pre_efficiency_elo`, `pre_hustle_elo`,
-`pre_three_point_elo`.
+`pre_three_point_elo`. (`player_name` is a human-readable "First Last" for
+skimming the data — it is never used in the model.)
 
 `player_elo_current.parquet` — **committed live state**. One row per player:
-their post-game ELO after the last game they appeared in, plus `team_id` and
-`last_game_date`. This is what live predictions read for a team's current
-roster and ELO (there is no future box score to read a lineup from).
+their post-game ELO after the last game they appeared in, plus `player_name`,
+`team_id` and `last_game_date` (columns: `player_id`, `player_name`, `team_id`,
+`last_game_date`, `general_elo`, `{skill}_elo`×7). This is what live predictions
+read for a team's current roster and ELO (there is no future box score to read a
+lineup from).
 
 `player_elo_recent.parquet` — **committed live state**. The last `RECENT_N`
 (11) pre-game snapshots per player, in the same shape as `player_elo.parquet`.
