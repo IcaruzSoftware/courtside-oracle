@@ -18,7 +18,7 @@ class _Session:
     def __init__(self, status, payload=None):
         self._resp = _Resp(status, payload)
 
-    def get(self, url, timeout=None):
+    def get(self, url, timeout=None, proxies=None):
         return self._resp
 
 

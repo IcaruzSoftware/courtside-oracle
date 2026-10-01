@@ -142,10 +142,9 @@ Two completely different NBA data sources are used, for two different jobs:
    one-time historical bootstrap (`bootstrap_data.py` / `collect.py`).
    Provides the advanced and tracking box scores (`defensiveRating`,
    `trueShootingPercentage`, `PIE`, `speed`/`distance`/`touches`, etc.) that
-   the CDN does not have. Confirmed working with `nba_api`'s default
-   browser-like headers from the owner's home PC; whether a cloud/CI IP is
-   blocked is unverified (commonly reported elsewhere, not tested against
-   this repo) — see [operations.md](operations.md).
+   the CDN does not have. Works with `nba_api`'s default browser-like headers
+   from the owner's home PC, but **times out from GitHub-hosted runners**
+   (confirmed), so the bootstrap is a local/overnight job — never CI.
 
 2. **cdn.nba.com** (via `src/pipeline/nba_cdn.py`, plain `requests` with the
    browser-style header constant `CDN_HEADERS`; `nba_api`'s live header set is
@@ -156,6 +155,18 @@ Two completely different NBA data sources are used, for two different jobs:
    - `liveData/boxscore/boxscore_{game_id}.json` — one game's live box score
      (`fetch_boxscore()`), basic counting stats only. Exists from the
      **2019-20 season onward**; older game IDs return 403/404.
+
+   **Confirmed: cdn.nba.com also returns 403 from GitHub-hosted runners** even
+   with `CDN_HEADERS` (NBA blacklists cloud IP ranges), while it works direct
+   from a home PC. To keep NBA data, the daily jobs route these CDN calls
+   through static residential proxies set in the `NBA_PROXIES` secret
+   (comma-separated `http(s)://user:pass@host:port`; URL-encode special
+   characters in the password). `nba_cdn` reads `NBA_PROXIES`, validates each
+   entry, fails over across them sticky to the last that worked, and on
+   all-fail raises a credential-free `proxy #i (host:port): <reason>` summary.
+   Unset/empty → direct connection (local dev, unchanged). Check reachability
+   with `python src/pipeline/nba_cdn.py --check` or the `check_nba_proxies.yml`
+   workflow — see [operations.md](operations.md).
 
 ### Game-ID prefixes
 

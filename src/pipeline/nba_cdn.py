@@ -22,6 +22,7 @@ Game-ID prefixes (first 3 chars of the 10-digit id):
 import json
 import logging
 import os
+import urllib.parse
 
 import requests
 
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 # Offline/testing seam: if set, the schedule is read from this local JSON file
 # instead of the live CDN (same shape as scheduleLeagueV2.json).
 SCHEDULE_ENV = "COURTSIDE_SCHEDULE_JSON"
+
+# Optional residential proxies for the CDN calls. NBA blacklists cloud IP ranges,
+# so cdn.nba.com returns 403 from GitHub-hosted runners even with CDN_HEADERS.
+# Comma-separated list of http(s)://user:pass@host:port; unset/empty -> direct.
+PROXY_ENV = "NBA_PROXIES"
 
 SCHEDULE_URL = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
 BOXSCORE_URL = "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
@@ -64,16 +70,111 @@ ALLSTAR_PREFIX   = "003"
 STATEFUL_PREFIXES = {"002", "004", "005", "006"}
 
 _session: requests.Session | None = None
+_channels: list | None = None   # ordered list of proxy URLs, or [None] for direct
+_sticky_idx: int = 0            # index of the last channel that worked
+
+# Errors that mean "this channel is bad, try the next one".
+_FAILOVER_ERRORS = (
+    requests.exceptions.ProxyError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+
+def reset_session() -> None:
+    """Drop cached session/channel state (so a changed NBA_PROXIES takes effect)."""
+    global _session, _channels, _sticky_idx
+    _session = None
+    _channels = None
+    _sticky_idx = 0
+
+
+def _validate_proxy(entry: str, idx: int) -> None:
+    """Raise ValueError (never echoing the value) if a proxy entry is malformed."""
+    bad = False
+    try:
+        parsed = urllib.parse.urlparse(entry)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname or not parsed.port:
+            bad = True
+    except ValueError:
+        bad = True
+    if bad:
+        raise ValueError(
+            f"{PROXY_ENV} entry #{idx} is malformed. Expected "
+            "'http(s)://user:pass@host:port' with a scheme, host and port. "
+            "If the password contains special characters (@ : / etc.) they must be "
+            "URL-encoded (e.g. '@' -> '%40'), or urllib3 fails to parse the proxy. "
+            "(The value is not shown for safety.)"
+        )
+
+
+def _ensure_channels() -> list:
+    """Parse + validate NBA_PROXIES once. Returns proxy URLs, or [None] for direct."""
+    global _channels
+    if _channels is None:
+        entries = [p.strip() for p in os.environ.get(PROXY_ENV, "").split(",") if p.strip()]
+        for idx, entry in enumerate(entries):
+            _validate_proxy(entry, idx)
+        _channels = entries or [None]
+    return _channels
 
 
 def _get_session() -> requests.Session:
-    """A cached Session carrying the verified cdn.nba.com browser header set."""
+    """A cached Session carrying the verified cdn.nba.com browser header set.
+    Creating it validates any configured proxies."""
     global _session
+    _ensure_channels()  # validate proxies at session-creation time
     if _session is None:
         s = requests.Session()
         s.headers.update(CDN_HEADERS)
         _session = s
     return _session
+
+
+def _proxies_arg(channel):
+    return None if channel is None else {"http": channel, "https": channel}
+
+
+def _host_port(channel) -> str:
+    """'host:port' for a proxy (never its credentials), or 'direct'."""
+    if channel is None:
+        return "direct"
+    p = urllib.parse.urlparse(channel)
+    return f"{p.hostname}:{p.port}"
+
+
+def _get_with_failover(url: str) -> requests.Response:
+    """
+    GET ``url`` through the configured channels with sticky failover.
+
+    Tries the last-working channel first, then the rest in order. A ProxyError /
+    ConnectionError / Timeout, or an HTTP 403 (Akamai block of that IP), moves on to
+    the next channel. A 200 or 404 is returned (the caller handles 404). If every
+    channel fails, raises a RuntimeError summarising each as
+    ``proxy #i (host:port): <error type or HTTP status>`` — host:port only, never
+    credentials.
+    """
+    global _sticky_idx
+    channels = _ensure_channels()
+    session = _get_session()
+    n = len(channels)
+    failures: list[str] = []
+
+    for k in range(n):
+        i = (_sticky_idx + k) % n
+        channel = channels[i]
+        try:
+            resp = session.get(url, timeout=_TIMEOUT, proxies=_proxies_arg(channel))
+        except requests.exceptions.RequestException as exc:
+            failures.append(f"proxy #{i} ({_host_port(channel)}): {type(exc).__name__}")
+            continue
+        if resp.status_code in (200, 404):
+            _sticky_idx = i
+            return resp
+        # 403 (IP blocked) or any other status -> try the next channel.
+        failures.append(f"proxy #{i} ({_host_port(channel)}): HTTP {resp.status_code}")
+
+    raise RuntimeError("All NBA CDN channels failed: " + "; ".join(failures))
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +247,7 @@ def fetch_schedule() -> dict:
         logger.info("Reading schedule from %s (%s)", override, SCHEDULE_ENV)
         with open(override, encoding="utf-8") as f:
             return json.load(f)
-    resp = _get_session().get(SCHEDULE_URL, timeout=_TIMEOUT)
+    resp = _get_with_failover(SCHEDULE_URL)
     resp.raise_for_status()
     return resp.json()
 
@@ -204,23 +305,70 @@ def fetch_boxscore(game_id: str) -> dict | None:
     Fetch one game's live box score. Returns the ``game`` sub-dict, or None when the
     box score does not exist yet (HTTP 404 — a scheduled/not-yet-played game).
 
-    A 403 is Akamai "Access Denied": the daily pipeline only ever fetches games from
-    2019-20 onward (which all have box scores), so a 403 means the CDN is blocking
-    this client (e.g. GitHub runners). That must fail the run loudly rather than be
-    swallowed as "not available", so it is raised.
+    A 403 is Akamai "Access Denied" (blocked IP): it triggers proxy failover inside
+    _get_with_failover, and if every channel is blocked the whole fetch raises. The
+    daily pipeline only fetches games from 2019-20 onward (which all have box scores),
+    so a 403 never means "not available".
     """
     gid = str(game_id).zfill(10)
-    url = BOXSCORE_URL.format(game_id=gid)
-    resp = _get_session().get(url, timeout=_TIMEOUT)
+    resp = _get_with_failover(BOXSCORE_URL.format(game_id=gid))
     if resp.status_code == 404:
         logger.info("boxscore %s not available yet (HTTP 404)", gid)
         return None
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"CDN box score {gid} returned HTTP {resp.status_code} — cdn.nba.com is "
-            f"blocking this client (403 = Access Denied)."
-        )
     try:
         return resp.json().get("game")
     except ValueError:
         raise RuntimeError(f"CDN box score {gid}: invalid JSON response")
+
+
+# ---------------------------------------------------------------------------
+# Connectivity check (CLI)
+# ---------------------------------------------------------------------------
+
+def check() -> int:
+    """
+    Fetch the schedule + box score 0042500405 through each configured proxy (or direct
+    if none) and print status / size / latency. Returns 0 if at least one channel
+    fully works, else 1.
+    """
+    import time
+
+    channels = _ensure_channels()
+    session = _get_session()
+    box_url = BOXSCORE_URL.format(game_id="0042500405")
+    any_ok = False
+
+    for i, channel in enumerate(channels):
+        label = _host_port(channel)
+        ok = True
+        for name, url in (("schedule", SCHEDULE_URL), ("boxscore", box_url)):
+            t0 = time.monotonic()
+            try:
+                resp = session.get(url, timeout=_TIMEOUT, proxies=_proxies_arg(channel))
+                dt = time.monotonic() - t0
+                print(f"proxy #{i} ({label}) {name:9} HTTP {resp.status_code}  "
+                      f"{len(resp.content):>9,} B  {dt:5.2f}s")
+                if resp.status_code != 200:
+                    ok = False
+            except requests.exceptions.RequestException as exc:
+                dt = time.monotonic() - t0
+                print(f"proxy #{i} ({label}) {name:9} {type(exc).__name__}  {dt:5.2f}s")
+                ok = False
+        any_ok = any_ok or ok
+
+    print("OK - at least one channel works." if any_ok else "FAILED - no working channel.")
+    return 0 if any_ok else 1
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(description="NBA CDN client")
+    parser.add_argument("--check", action="store_true",
+                        help="Test each configured proxy (or direct) against the CDN")
+    args = parser.parse_args()
+    if args.check:
+        sys.exit(check())
+    parser.print_help()

@@ -29,6 +29,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          NBA_PROXIES:  ${{ secrets.NBA_PROXIES }}
         run: python src/scripts/daily_run.py --evaluate
 
       - name: Commit updated state files if changed

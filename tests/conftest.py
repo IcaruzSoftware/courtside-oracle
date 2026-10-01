@@ -147,6 +147,15 @@ def fake_supabase():
     return FakeSupabase
 
 
+@pytest.fixture(autouse=True)
+def _reset_nba_cdn():
+    """Clear cached CDN session/proxy state so NBA_PROXIES changes take effect per test."""
+    from pipeline import nba_cdn
+    nba_cdn.reset_session()
+    yield
+    nba_cdn.reset_session()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures: real CDN box score + tiny live state built from it
 # ---------------------------------------------------------------------------

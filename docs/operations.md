@@ -59,8 +59,10 @@ All three live in `.github/workflows/` and run on `ubuntu-latest` with Python
   on every run (`if: always()`, so it still re-enables the workflows even if
   the Supabase ping above failed), keeping all three schedules alive
   indefinitely. Needs `permissions: actions: write`.
-- **NBA CDN reachability from GitHub-hosted runners is unconfirmed** — see
-  the note under "Common failure causes" below.
+- **The daily CDN calls go through residential proxies** (`NBA_PROXIES`
+  secret): cdn.nba.com returns 403 from GitHub-hosted runners (NBA blacklists
+  cloud IP ranges), so direct access only works locally. See the "NBA CDN
+  block / 403" entry under "When a job fails" below.
 
 ## Required GitHub secrets
 
@@ -68,10 +70,12 @@ All three live in `.github/workflows/` and run on `ubuntu-latest` with Python
 |---|---|---|
 | `SUPABASE_URL` | `daily_predict.yml`, `daily_evaluate.yml`, `keepalive.yml` | Public project URL, safe to also keep in local `.env` |
 | `SUPABASE_KEY` | same | **Service-role key** — bypasses RLS, full read/write. Never expose this to the web app (see `web`'s `NEXT_PUBLIC_SUPABASE_ANON_KEY`, which is a different, RLS-restricted key set in Vercel, not GitHub) |
+| `NBA_PROXIES` | `daily_predict.yml`, `daily_evaluate.yml`, `check_nba_proxies.yml` | 1–3 static residential proxies, comma-separated `http(s)://user:pass@host:port`. URL-encode special characters in the password (e.g. `@`→`%40`) or urllib3 fails to parse it. Unset/empty → direct connection (local dev). Required in CI (see below). |
 
-`PROXIES` is **obsolete** — it was only ever read by `collect.py`'s proxy
-pool, which nothing in the current daily pipeline uses (the CDN path needs no
-proxy). Safe to delete from repo secrets.
+`PROXIES` (singular, no `NBA_` prefix) is **obsolete** — it was only ever read
+by `collect.py`'s proxy pool, which nothing in the current daily pipeline uses.
+Safe to delete from repo secrets. The pipeline's proxy support is the separate
+`NBA_PROXIES` secret above (CDN failover), not `PROXIES`.
 
 ## When a job fails
 
@@ -83,17 +87,24 @@ logs at `INFO` level with timestamps. Common causes:
   step will also be failing. Reopen the project in the Supabase dashboard
   (unpausing is manual on the free tier) and re-run the workflow
   (`workflow_dispatch`).
-- **NBA CDN block / 403.** `nba_cdn.fetch_boxscore()` treats a 404 as normal
-  (game not played yet — returns `None`, not an error) but **raises** on any
-  other non-200 status, e.g. 403 after Akamai rejects the request
-  (missing/stale `Origin`/`Referer`/`Sec-Fetch-*` headers, or the runner's IP
-  being blocked outright); `fetch_schedule()` raises on any HTTP error. This
-  fails the job loudly by design — silently skipping a day's state update
-  would be worse than a visible failure. **Whether GitHub-hosted runners can
-  reach cdn.nba.com at all is being verified on the first live runs — treat
-  this as an open question until confirmed, and update this paragraph once it
-  is.** If it turns out GitHub's IP ranges are blocked, the fix is a proxy or
-  a self-hosted runner; no such fallback exists yet.
+- **NBA CDN block / 403.** **Confirmed on the first live runs:** cdn.nba.com
+  returns 403 from GitHub-hosted runners even with the correct `CDN_HEADERS`
+  (NBA blacklists cloud IP ranges); stats.nba.com times out from runners too;
+  ESPN's endpoints are reachable. Because the owner wants to keep NBA data, the
+  daily jobs route the CDN calls through the residential proxies in the
+  `NBA_PROXIES` secret. `nba_cdn` tries the proxies in order, sticks to the last
+  one that worked, and treats a 403 (or a connection error/timeout) from a proxy
+  as "this IP is blocked → fail over to the next". A 404 is still normal (game
+  not played yet → `fetch_boxscore()` returns `None`). If **every** proxy fails,
+  the fetch raises a summary naming each `proxy #i (host:port): <reason>` —
+  host:port only, never credentials — and the job fails loudly (silently skipping
+  a day's state update would be worse). **Fix:** rotate or replace the blocked
+  proxy in the `NBA_PROXIES` secret and re-run the workflow. **Verify proxies
+  first** with the manual **Check NBA Proxies** workflow (`check_nba_proxies.yml`,
+  `workflow_dispatch`) or locally:
+  `NBA_PROXIES='http://user:pass@host:port' python src/pipeline/nba_cdn.py --check`
+  — it fetches the schedule + a box score through each proxy individually and
+  prints status / size / latency, exiting 0 if at least one proxy fully works.
 - **State conflict / merge conflict on push.** `daily_evaluate.yml`'s commit
   step already does `git pull --rebase origin <branch>` before `git push`, so
   the common case — another commit landed on `main` between the checkout and

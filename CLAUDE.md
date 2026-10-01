@@ -105,21 +105,28 @@ is no longer true. `player_elo.parquet` (full history) and
 
 Two unrelated sources, never mixed in one run:
 
-- **stats.nba.com** (via `nba_api`) — bootstrap only. Confirmed working from
-  the owner's home PC with `nba_api`'s default browser-like headers; a plain
-  `curl` times out. Whether it's reachable from a cloud/CI IP is unverified
-  here (commonly reported to be blocked, but not tested against this repo).
-- **cdn.nba.com** (via `src/pipeline/nba_cdn.py`) — the entire daily
-  pipeline. Needs the browser-style JSON header set in `nba_cdn.CDN_HEADERS`
-  (modern UA, `Origin`/`Referer` `https://www.nba.com`, `Sec-Fetch-*`) — a
-  plain request, and even `nba_api`'s own (outdated) live header set, gets an
-  Akamai 403. Box scores exist from the 2019-20 season onward. `fetch_boxscore()`
-  treats a 404 as normal (game not played yet → returns `None`) but raises on
-  any other non-200 status (403 = Akamai blocking this client) — that failure
-  is intentionally loud, never silently skipped. **Whether GitHub-hosted
-  runners can reach cdn.nba.com at all is unconfirmed** — see
-  [docs/operations.md](docs/operations.md) for the marked-TBD paragraph;
-  update it once the first live runs settle the question.
+- **stats.nba.com** (via `nba_api`) — bootstrap only. Works from the owner's
+  home PC with `nba_api`'s default browser-like headers; **times out from
+  GitHub-hosted runners** (confirmed), so the full rebuild is a local/overnight
+  job, never CI.
+- **cdn.nba.com** (via `src/pipeline/nba_cdn.py`) — the entire daily pipeline.
+  Needs the browser-style JSON header set in `nba_cdn.CDN_HEADERS` (modern UA,
+  `Origin`/`Referer` `https://www.nba.com`, `Sec-Fetch-*`) — a plain request,
+  and even `nba_api`'s own (outdated) live header set, gets an Akamai 403.
+  **Confirmed: cdn.nba.com returns 403 from GitHub-hosted runners even with
+  `CDN_HEADERS`** (NBA blacklists cloud IP ranges), while it works direct from a
+  home PC. So the daily jobs route the CDN calls through static residential
+  proxies configured in the `NBA_PROXIES` secret (comma-separated
+  `http(s)://user:pass@host:port`; URL-encode special characters in the password
+  or urllib3 fails to parse it). Unset/empty → direct connection (local dev,
+  unchanged). `nba_cdn` fails over across the proxies in order, sticky to the
+  last one that worked, and on all-fail raises a summary that names each
+  `host:port` but never credentials. Box scores exist from the 2019-20 season
+  onward. `fetch_boxscore()` treats a 404 as normal (game not played yet →
+  `None`) and a 403 as an IP block (failover trigger, loud on total failure,
+  never silently skipped). Verify proxy reachability with
+  `python src/pipeline/nba_cdn.py --check` (or the manual `check_nba_proxies.yml`
+  workflow) — see [docs/operations.md](docs/operations.md).
 
 ## Invariants / gotchas
 
@@ -160,6 +167,11 @@ Two unrelated sources, never mixed in one run:
   days idle, kept awake by `keepalive.yml`). Service-role key in GitHub
   secrets (`SUPABASE_KEY`); anon key in Vercel env
   (`NEXT_PUBLIC_SUPABASE_ANON_KEY`) — never the same key in both places.
+- **NBA proxies**: GitHub secret `NBA_PROXIES` (comma-separated
+  `http(s)://user:pass@host:port`, 1–3 static residential proxies) routes the
+  daily CDN calls past NBA's cloud-IP block. Passed to `daily_predict.yml`,
+  `daily_evaluate.yml`, and `check_nba_proxies.yml`. The old `PROXIES` secret
+  (nba_api proxy-pool, bootstrap only) is obsolete and unused by the pipeline.
 - **Vercel** team "icaruz-software", static export, deploys on push to `main`.
 - **Portfolio embed**: `/card` is iframed from `IcaruzSoftware/portfolio` — a
   breaking change to its markup/query needs a check in that repo too.
