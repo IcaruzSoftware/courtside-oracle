@@ -17,6 +17,7 @@ import argparse
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -122,6 +123,7 @@ def _recompute_running_record(db, dry_run: bool) -> None:
             "total_correct":   total_correct,
             "total_incorrect": total_incorrect,
             "accuracy":        accuracy,
+            "last_updated":    datetime.now(timezone.utc).isoformat(),
         }, on_conflict="id").execute()
 
 

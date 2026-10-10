@@ -1,5 +1,7 @@
 """Evaluate: the running record counts only predictions from RECORD_START onward."""
 
+from datetime import datetime
+
 import pipeline.evaluate as ev
 
 
@@ -67,3 +69,5 @@ def test_running_record_recomputed_when_no_pending(fake_supabase):
     assert rec["total_correct"] == 1
     assert rec["total_incorrect"] == 1
     assert rec["accuracy"] == 0.5
+    assert rec["last_updated"]
+    datetime.fromisoformat(rec["last_updated"])
