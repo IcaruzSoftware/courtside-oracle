@@ -21,16 +21,18 @@ All three live in `.github/workflows/` and run on `ubuntu-latest` with Python
 
 ### `daily_predict.yml` — Daily Predictions
 
-- **Schedule:** `0 15 * * *` (15:00 UTC = 11:00 AM ET, before most tip-offs).
-  Also `workflow_dispatch` (manual trigger from the Actions tab).
+- **Trigger:** `workflow_run` on `daily_evaluate.yml` completing (any
+  conclusion), not its own cron — so it always runs right after evaluate
+  commits fresh state, regardless of scheduler delay. Also `workflow_dispatch`
+  (manual trigger from the Actions tab).
 - **Runs:** `python src/scripts/daily_run.py --predict`.
 - **Commits nothing.** Only writes to Supabase (`predictions`, `shap_values`)
   via `SUPABASE_URL` / `SUPABASE_KEY`.
 
 ### `daily_evaluate.yml` — Daily Evaluate
 
-- **Schedule:** `0 12 * * *` (12:00 UTC = 8:00 AM ET, after overnight games
-  are final). Also `workflow_dispatch`.
+- **Schedule:** `0 7 * * *` (07:00 UTC = 3:00 AM ET, 2:00 AM in winter/EST,
+  after West Coast games are final). Also `workflow_dispatch`.
 - **Runs:** `python src/scripts/daily_run.py --evaluate`, which runs two
   independent steps, each in its own try/except: first `evaluate.py` (resolve
   pending predictions, recompute `running_record`), then `daily_state.run()`

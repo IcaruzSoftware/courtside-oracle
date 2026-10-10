@@ -83,11 +83,12 @@ python src/pipeline/predict.py --home NYK --away OKC --date 2026-06-05    # a hy
 
 Three scheduled GitHub Actions workflows keep the site current:
 
-- **Daily Predictions** (`daily_predict.yml`) — 11:00 AM ET, predicts every
-  regular-season/playoff/play-in/Cup-final game tipping off that day.
-- **Daily Evaluate** (`daily_evaluate.yml`) — 8:00 AM ET, resolves yesterday's
+- **Daily Evaluate** (`daily_evaluate.yml`) — 3:00 AM ET, resolves yesterday's
   predictions against final box scores, recomputes the running record, and
   advances the committed ELO/state files from the NBA CDN.
+- **Daily Predictions** (`daily_predict.yml`) — triggered by Daily Evaluate's
+  completion (not its own schedule), predicts every
+  regular-season/playoff/play-in/Cup-final game tipping off that day.
 - **Keepalive** (`keepalive.yml`) — pings Supabase daily so the free-tier
   project doesn't auto-pause, and re-enables the other two workflows (GitHub
   auto-disables scheduled workflows in public repos after 60 days of

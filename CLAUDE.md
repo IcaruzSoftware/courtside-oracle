@@ -53,8 +53,8 @@ src/supabase/
   schema.sql            fresh-setup schema (tables + RLS), run once in the SQL editor
   migrations/001_*.sql  brings a pre-existing DB up to schema.sql's shape (game_time_utc + RLS)
 .github/workflows/
-  daily_predict.yml   11:00 AM ET — predict today's games
-  daily_evaluate.yml  8:00 AM ET — resolve results + advance committed state
+  daily_predict.yml   runs after daily_evaluate.yml completes — predict today's games
+  daily_evaluate.yml  3:00 AM ET — resolve results + advance committed state
   keepalive.yml       daily — ping Supabase, re-enable workflows GitHub auto-disabled
 web/                  Next.js 15, static export; manual build+upload to the owner's Plesk server (no auto-deploy); app/(main)/ = site, app/card/ = iframe widget
 tests/                pytest; conftest.py has a FakeSupabase + a tiny built-from-fixture live state
@@ -211,6 +211,8 @@ Two unrelated sources, never mixed in one run:
 
 - **Change a job's schedule** — edit the `cron:` line in the relevant
   `.github/workflows/*.yml` (times are UTC; comments note the ET equivalent).
+  `daily_predict.yml` has no cron of its own — it follows `daily_evaluate.yml`
+  via `workflow_run`.
 - **Add a feature** — add a `get_*_features()` function in `features.py`,
   wire it into `build_feature_matrix()` (both training and live call the same
   function unless it needs `use_current_elo` branching), then **you must
