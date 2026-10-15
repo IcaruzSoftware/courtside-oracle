@@ -9,8 +9,8 @@ import TeamLogo from "@/components/TeamLogo";
 const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
 
 export default function CardPage() {
-  const [prediction, setPrediction] = useState<Prediction | null>(null);
-  const [isUpcoming, setIsUpcoming] = useState(true);
+  const [predictions, setPredictions] = useState<Prediction[]>([]);
+  const [index, setIndex] = useState(0);
   const [record, setRecord] = useState<RunningRecord | null>(null);
 
   useEffect(() => {
@@ -23,12 +23,13 @@ export default function CardPage() {
           getRunningRecord(),
         ]);
         if (cancelled) return;
-        setPrediction(card?.prediction ?? null);
-        setIsUpcoming(card?.isUpcoming ?? true);
+        setPredictions(card?.predictions ?? []);
+        setIndex(card?.index ?? 0);
         setRecord(rec);
       } catch {
         if (cancelled) return;
-        setPrediction(null);
+        setPredictions([]);
+        setIndex(0);
         setRecord(null);
       }
     }
@@ -39,6 +40,9 @@ export default function CardPage() {
     };
   }, []);
 
+  const prediction = predictions[index] ?? null;
+  const isUpcoming = prediction ? prediction.actual_winner === null : true;
+  const hasMany = predictions.length > 1;
   const correct = record?.total_correct ?? 0;
   const incorrect = record?.total_incorrect ?? 0;
   const total = correct + incorrect;
@@ -53,7 +57,7 @@ export default function CardPage() {
   const tipoffMs = prediction?.game_time_utc ? new Date(prediction.game_time_utc).getTime() : null;
   const now = Date.now();
   const isLive = isUpcoming && tipoffMs !== null && tipoffMs <= now && now < tipoffMs + THREE_HOURS_MS;
-  const tipoffLabel = isUpcoming && !isLive && tipoffMs !== null
+  const tipoffLabel = isUpcoming && tipoffMs !== null && tipoffMs > now
     ? new Date(tipoffMs).toLocaleString("en-US", {
         timeZone: "America/New_York",
         month: "short",
@@ -64,7 +68,7 @@ export default function CardPage() {
     : null;
 
   return (
-    <div className="w-full h-screen bg-brand-bg flex flex-col overflow-hidden">
+    <div className="relative w-full h-screen bg-brand-bg flex flex-col overflow-hidden">
 
       {/* Header */}
       <div className="px-5 py-3 border-b border-brand-border flex items-center justify-between flex-shrink-0">
@@ -88,15 +92,17 @@ export default function CardPage() {
       </div>
 
       {/* Game + Predicted winner */}
-      <div className="flex-1 grid grid-cols-2 divide-x divide-brand-border border-b border-brand-border min-h-0">
+      <div className="relative flex-1 grid grid-cols-2 divide-x divide-brand-border border-b border-brand-border min-h-0">
 
         {/* Game */}
         <div className="px-5 py-4 flex flex-col">
           <p className="text-[9px] tracking-widest uppercase text-brand-muted mb-3">
-            📅 {isUpcoming ? "NEXT GAME" : "LAST GAME"}
+            📅 {hasMany
+              ? `GAME ${index + 1} OF ${predictions.length}`
+              : isUpcoming ? "NEXT GAME" : "LAST GAME"}
           </p>
           {prediction ? (
-            <div className="flex items-center gap-3 flex-1">
+            <div key={prediction.id} className="flex items-center gap-3 flex-1">
               <div className="flex flex-col items-center gap-1">
                 <TeamLogo abbrev={prediction.home_team} teamId={prediction.home_team_id} size={40} />
                 <span className="text-[10px] font-bold text-white tracking-wide uppercase">{homeName}</span>
@@ -136,6 +142,29 @@ export default function CardPage() {
             <p className="text-xs text-brand-muted">No prediction yet</p>
           )}
         </div>
+
+        {hasMany && (
+          <>
+            <button
+              type="button"
+              aria-label="Previous game"
+              disabled={index === 0}
+              onClick={() => setIndex(index - 1)}
+              className={`absolute left-0 top-1/2 !border-0 -translate-y-1/2 w-5 text-lg text-brand-muted hover:text-brand-green ${index === 0 ? "invisible" : ""}`}
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              aria-label="Next game"
+              disabled={index === predictions.length - 1}
+              onClick={() => setIndex(index + 1)}
+              className={`absolute right-0 top-1/2 !border-0 -translate-y-1/2 w-5 text-lg text-brand-muted hover:text-brand-green ${index === predictions.length - 1 ? "invisible" : ""}`}
+            >
+              ›
+            </button>
+          </>
+        )}
       </div>
 
       {/* Running record */}
@@ -167,6 +196,17 @@ export default function CardPage() {
           </div>
         </div>
       </div>
+
+      {hasMany && (
+        <div aria-hidden className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex gap-1">
+          {predictions.map((p, i) => (
+            <span
+              key={p.id}
+              className={`w-3 h-0.5 rounded-full ${i === index ? "bg-brand-green" : "bg-brand-border"}`}
+            />
+          ))}
+        </div>
+      )}
 
     </div>
   );

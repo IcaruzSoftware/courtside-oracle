@@ -19,14 +19,16 @@ export async function getRecentPredictions(limit = 30): Promise<Prediction[]> {
 }
 
 export interface CardPrediction {
-  prediction: Prediction;
-  /** true = upcoming/unresolved game, false = most recent resolved game (fallback) */
-  isUpcoming: boolean;
+  /** all predictions of the anchor game's day, by tip-off time then game_id */
+  predictions: Prediction[];
+  /** position of the anchor game in `predictions` */
+  index: number;
 }
 
 /**
- * For the /card widget: the next upcoming (unresolved) game, or if there is
- * none, the most recently resolved game.
+ * For the /card widget: every prediction on the day of the anchor game, where
+ * the anchor is the next upcoming (unresolved) game, or if there is none, the
+ * most recently resolved game.
  */
 export async function getCardPrediction(): Promise<CardPrediction | null> {
   const cutoffIso = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
@@ -41,26 +43,39 @@ export async function getCardPrediction(): Promise<CardPrediction | null> {
     )
     .order("game_time_utc", { ascending: true, nullsFirst: false })
     .order("game_date", { ascending: true })
+    .order("game_id", { ascending: true })
     .limit(1);
 
   if (upcomingError) throw upcomingError;
-  if (upcoming && upcoming.length > 0) {
-    return { prediction: upcoming[0], isUpcoming: true };
+  let anchor: Prediction | undefined = upcoming?.[0];
+
+  if (!anchor) {
+    const { data: last, error: lastError } = await supabase
+      .from("predictions")
+      .select("*")
+      .not("actual_winner", "is", null)
+      .order("game_date", { ascending: false })
+      .order("game_time_utc", { ascending: false, nullsFirst: false })
+      .order("game_id", { ascending: false })
+      .limit(1);
+
+    if (lastError) throw lastError;
+    anchor = last?.[0];
   }
 
-  const { data: last, error: lastError } = await supabase
+  if (!anchor) return null;
+
+  const { data: day, error: dayError } = await supabase
     .from("predictions")
     .select("*")
-    .not("actual_winner", "is", null)
-    .order("game_date", { ascending: false })
-    .limit(1);
+    .eq("game_date", anchor.game_date)
+    .order("game_time_utc", { ascending: true, nullsFirst: false })
+    .order("game_id", { ascending: true });
 
-  if (lastError) throw lastError;
-  if (last && last.length > 0) {
-    return { prediction: last[0], isUpcoming: false };
-  }
-
-  return null;
+  if (dayError) throw dayError;
+  const predictions = day && day.length > 0 ? day : [anchor];
+  const index = Math.max(predictions.findIndex((p) => p.id === anchor.id), 0);
+  return { predictions, index };
 }
 
 export async function getShapValues(predictionId: string): Promise<ShapValue[]> {
