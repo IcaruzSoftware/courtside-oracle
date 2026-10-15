@@ -150,7 +150,7 @@ export default function CardPage() {
               aria-label="Previous game"
               disabled={index === 0}
               onClick={() => setIndex(index - 1)}
-              className={`absolute left-0 top-1/2 !border-0 -translate-y-1/2 w-5 text-lg text-brand-muted hover:text-brand-green ${index === 0 ? "invisible" : ""}`}
+              className={`absolute left-0 top-1/2 !border-0 -translate-y-1/2 w-6 text-2xl leading-none text-white hover:text-brand-green ${index === 0 ? "invisible" : ""}`}
             >
               ‹
             </button>
@@ -159,7 +159,7 @@ export default function CardPage() {
               aria-label="Next game"
               disabled={index === predictions.length - 1}
               onClick={() => setIndex(index + 1)}
-              className={`absolute right-0 top-1/2 !border-0 -translate-y-1/2 w-5 text-lg text-brand-muted hover:text-brand-green ${index === predictions.length - 1 ? "invisible" : ""}`}
+              className={`absolute right-0 top-1/2 !border-0 -translate-y-1/2 w-6 text-2xl leading-none text-white hover:text-brand-green ${index === predictions.length - 1 ? "invisible" : ""}`}
             >
               ›
             </button>
