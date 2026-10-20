@@ -108,7 +108,7 @@ export default function HomePage() {
                 Each prediction is made by an <span className="text-white">XGBoost</span> binary
                 classifier trained on <span className="text-white">14,108 NBA games</span> spanning
                 11 seasons (2015-16 through 2025-26). Before every game, a feature vector is assembled
-                from recent team form, head-to-head history, rest days, injury reports, and a custom{" "}
+                from recent team form, head-to-head history, rest days, and a custom{" "}
                 <span className="text-white">player ELO system</span> that tracks 7 skill dimensions
                 (scoring, efficiency, defense, playmaking, rebounding, and two composite ratings)
                 across a player's entire career.

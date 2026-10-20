@@ -99,12 +99,16 @@ export default function GameCard({ prediction, shap }: Props) {
             <span className={homeIsPredicted ? "text-brand-green" : "text-white"}>{homePct}%</span>
             <span className={homeIsPredicted ? "text-white" : "text-brand-green"}>{awayPct}%</span>
           </div>
-          <div className="flex h-2.5 gap-0.5 rounded-full overflow-hidden">
-            <div
-              className={`h-full ${homeIsPredicted ? "bg-brand-green" : "bg-gray-600"}`}
-              style={{ width: `${homePct}%` }}
-            />
-            <div className={`h-full flex-1 ${homeIsPredicted ? "bg-gray-600" : "bg-brand-green"}`} />
+          <div className="relative">
+            <div className="flex h-2.5 gap-0.5 rounded-full overflow-hidden">
+              <div
+                className={`h-full ${homeIsPredicted ? "bg-brand-green" : "bg-gray-600"}`}
+                style={{ width: `${homePct}%` }}
+              />
+              <div className={`h-full flex-1 ${homeIsPredicted ? "bg-gray-600" : "bg-brand-green"}`} />
+            </div>
+            {/* 50% reference line */}
+            <div className="absolute left-1/2 -top-1 -bottom-1 w-0.5 -translate-x-1/2 bg-white/70" />
           </div>
         </div>
 
