@@ -1,11 +1,11 @@
-"""Evaluate: the running record counts only predictions from RECORD_START onward."""
+"""Evaluate: the running record is all-time (includes the seeded 2026 Finals rows)."""
 
 from datetime import datetime
 
 import pipeline.evaluate as ev
 
 
-def test_running_record_excludes_pre_record_start(monkeypatch, fake_supabase):
+def test_running_record_is_all_time(monkeypatch, fake_supabase):
     seed = {
         "predictions": [
             # pending current-season game (will be resolved this run)
@@ -15,7 +15,7 @@ def test_running_record_excludes_pre_record_start(monkeypatch, fake_supabase):
             # already-resolved current-season game
             {"id": "b", "game_id": "0022600002", "game_date": "2026-11-02",
              "predicted_team": "LAL", "actual_winner": "LAL", "correct": True},
-            # pre-RECORD_START seeded Finals rows — must be excluded from the record
+            # seeded 2026 Finals rows — counted in the all-time record
             {"id": "c", "game_id": "0042500401", "game_date": "2026-06-03",
              "predicted_team": "NYK", "actual_winner": "NYK", "correct": True},
             {"id": "d", "game_id": "0042500403", "game_date": "2026-06-08",
@@ -29,10 +29,10 @@ def test_running_record_excludes_pre_record_start(monkeypatch, fake_supabase):
     ev.evaluate(dry_run=False, db=db)
 
     rec = [w[2] for w in db.writes if w[0] == "running_record" and w[1] == "upsert"][-1]
-    # Counted: a (BOS==BOS, correct) + b (correct) = 2/2. Finals c/d excluded.
-    assert rec["total_correct"] == 2
-    assert rec["total_incorrect"] == 0
-    assert rec["accuracy"] == 1.0
+    # Counted: a (BOS==BOS, correct) + b (correct) + Finals c (correct) + d (wrong) = 3/1.
+    assert rec["total_correct"] == 3
+    assert rec["total_incorrect"] == 1
+    assert rec["accuracy"] == 0.75
 
 
 def test_dry_run_writes_nothing(monkeypatch, fake_supabase):
@@ -65,9 +65,9 @@ def test_running_record_recomputed_when_no_pending(fake_supabase):
     ev.evaluate(dry_run=False, db=db)
 
     rec = [w[2] for w in db.writes if w[0] == "running_record" and w[1] == "upsert"][-1]
-    # Current-season only: b (correct) + e (wrong) = 1/1/0.5; Finals row c excluded.
-    assert rec["total_correct"] == 1
+    # All-time: b (correct) + e (wrong) + Finals row c (correct) = 2/1.
+    assert rec["total_correct"] == 2
     assert rec["total_incorrect"] == 1
-    assert rec["accuracy"] == 0.5
+    assert rec["accuracy"] == round(2 / 3, 4)
     assert rec["last_updated"]
     datetime.fromisoformat(rec["last_updated"])

@@ -71,8 +71,8 @@ numbers were produced: ~9,875 train / 2,116 calibration / 2,116 test).
 
 **These numbers are optimistic relative to what the live pipeline can
 actually deliver — see the caveats below before quoting them as "current
-accuracy."** The site's own `running_record` table (tracked from
-`RECORD_START`, see [operations.md](operations.md)) is the honest, live number.
+accuracy."** The site's own `running_record` table (all-time, includes the 5
+retroactively seeded 2026 Finals rows from `seed_finals.py`) is the honest, live number.
 
 ## Honest caveats
 

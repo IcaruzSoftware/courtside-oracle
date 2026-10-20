@@ -39,7 +39,7 @@ Nothing guarantees a gain. Measure first (Phase A/B), then build.
   - **Availability features:** real in training, always neutral live, because there is no injury feed. The re-downloaded bootstrap data has no `boxscore_summary`, so a retrain on it loses the signal entirely.
   - **Optuna:** its CV runs on train+calibration (85%).
   - **Daily CDN updates:** they lack `defensiveRating` and tracking data, so defense degrades and hustle freezes after the bootstrap.
-- **Status:** live. The NBA 2026-27 season starts around 2026-10-20, the daily workflows commit state every morning, and `RECORD_START` gates the public record.
+- **Status:** live. The NBA 2026-27 season starts around 2026-10-20, the daily workflows commit state every morning, and the public running record is all-time (includes the 5 seeded 2026 Finals rows).
 
 ## Ground rules
 

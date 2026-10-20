@@ -9,8 +9,8 @@ What it does:
   1. Fetches predictions from Supabase where actual_winner is NULL
   2. Pulls final results from the NBA CDN box score (never stats.nba.com game logs)
   3. Marks each prediction correct/wrong + stores actual_winner
-  4. Recomputes the running_record over predictions from RECORD_START onward, so the
-     retroactively-seeded 2026 Finals rows (seed_finals.py) are excluded.
+  4. Recomputes the running_record over all resolved predictions (all-time, including
+     the retroactively-seeded 2026 Finals rows from seed_finals.py).
 """
 
 import argparse
@@ -25,10 +25,6 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
-
-# The running record counts only predictions from the current season onward. The
-# 2026 Finals rows seeded by seed_finals.py have earlier game_dates and are excluded.
-RECORD_START = "2026-10-01"
 
 
 def _get_supabase():
@@ -98,23 +94,22 @@ def evaluate(dry_run: bool = False, db=None) -> None:
             logger.info("No completed games found yet.")
 
     # Recompute the running record on every run, so the site reflects the correct
-    # (RECORD_START-onward) tally even on days with nothing to grade.
+    # all-time tally even on days with nothing to grade.
     _recompute_running_record(db, dry_run)
 
 
 def _recompute_running_record(db, dry_run: bool) -> None:
-    """Recompute + upsert running_record over resolved predictions from RECORD_START."""
-    rows = (db.table("predictions").select("correct,game_date")
+    """Recompute + upsert running_record over all resolved predictions (all-time)."""
+    rows = (db.table("predictions").select("correct")
               .not_.is_("correct", "null").execute().data) or []
-    counted          = [r for r in rows if str(r["game_date"]) >= RECORD_START]
-    total_correct    = sum(1 for r in counted if r["correct"])
-    total_incorrect  = sum(1 for r in counted if not r["correct"])
+    total_correct    = sum(1 for r in rows if r["correct"])
+    total_incorrect  = sum(1 for r in rows if not r["correct"])
     total            = total_correct + total_incorrect
     accuracy         = round(total_correct / total, 4) if total > 0 else None
 
     logger.info(
-        "Running record (from %s): %d correct / %d total (%.1f%%)%s",
-        RECORD_START, total_correct, total, (accuracy or 0) * 100,
+        "Running record: %d correct / %d total (%.1f%%)%s",
+        total_correct, total, (accuracy or 0) * 100,
         " [dry-run]" if dry_run else "",
     )
     if not dry_run:

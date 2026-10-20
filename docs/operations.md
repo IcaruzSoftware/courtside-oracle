@@ -243,9 +243,7 @@ change in the portfolio repo itself unless the iframe URL changes.
 Nothing to run manually — season boundaries are derived from dates
 everywhere (`_season_of()` / `_date_to_season()`: October or later = new
 season). 2026-27: preseason from 2026-10-03, regular season opens
-2026-10-20. The public running record only counts predictions with
-`game_date >= RECORD_START` (currently `"2026-10-01"`, in `evaluate.py`) —
-bump this constant if you want the ticker to reset for a new season instead
-of accumulating across seasons. The 5 rows inserted by `seed_finals.py` (the
-2026 Finals, predicted retroactively) have earlier `game_date`s and are
-excluded by this cutoff regardless.
+2026-10-20. The public running record is all-time: it accumulates across seasons and
+includes the 5 retroactively seeded 2026 Finals rows from `seed_finals.py`.
+If you ever want a per-season reset, reintroduce a `game_date` cutoff in
+`evaluate.py`'s `_recompute_running_record`.

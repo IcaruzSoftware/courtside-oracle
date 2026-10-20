@@ -146,9 +146,9 @@ Two unrelated sources, never mixed in one run:
 - `evaluate.py` recomputes `running_record` on every run (not only when a
   prediction was just resolved), and the state update in `daily_run.py
   --evaluate` still runs even if `evaluate()` itself raised.
-- `RECORD_START` (`evaluate.py`, currently `"2026-10-01"`) is the only thing
-  keeping the 5 retroactive `seed_finals.py` rows out of the public running
-  record. Don't re-run `seed_finals.py`.
+- The public running record is all-time and includes the 5 retroactive
+  `seed_finals.py` 2026 Finals rows (4-1). Don't re-run `seed_finals.py` (it
+  would insert duplicates/overwrite).
 - MATCHUP string (`"XXX vs. YYY"` = home, `"XXX @ YYY"` = away) is the only
   home/away signal in the game logs — there's no dedicated column.
 - The **committed model** was trained on the original dataset (`collect.py`,

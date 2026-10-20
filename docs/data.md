@@ -120,9 +120,9 @@ delete), `feature_name`, `shap_value`, `feature_value`.
 
 **`running_record`** — single row (`id = 1`, enforced by the primary key
 default): `total_correct`, `total_incorrect`, `accuracy`, `last_updated`.
-Recomputed by `evaluate.py` on every run over predictions with
-`game_date >= RECORD_START` (see [model.md](model.md) and
-[operations.md](operations.md) for what `RECORD_START` excludes and why).
+Recomputed by `evaluate.py` on every run over all resolved predictions —
+all-time, includes the 5 retroactively seeded 2026 Finals rows from
+`seed_finals.py`.
 
 **`model_metadata`** — one row per trained model version
 (`model_version`, `trained_on_date`, `seasons_covered`, `accuracy_on_test`,

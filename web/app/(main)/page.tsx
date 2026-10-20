@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { getRecentPredictions, getRunningRecord, getShapValues } from "@/lib/supabase";
 import { getEasternDateString } from "@/lib/date";
-import GameCard from "@/components/GameCard";
+import GameCarousel from "@/components/GameCarousel";
 import RecordStats from "@/components/RecordStats";
 import RecentPredictionsTable from "@/components/RecentPredictionsTable";
 import type { Prediction, RunningRecord, ShapValue } from "@/lib/types";
@@ -61,11 +61,7 @@ export default function HomePage() {
         {todaysPredictions.length === 0 ? (
           <EmptyState message="No games scheduled today. Check back tomorrow." />
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2">
-            {todaysPredictions.map(p => (
-              <GameCard key={p.id} prediction={p} shap={shapMap[p.id]} />
-            ))}
-          </div>
+          <GameCarousel predictions={todaysPredictions} shapMap={shapMap} />
         )}
       </section>
 

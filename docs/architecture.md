@@ -52,7 +52,8 @@ daily. They never mix within one run.
 5. **Evaluate** (`evaluate.py`, run as part of `daily_run.py --evaluate`,
    first of its two independent steps) resolves any `predictions` rows still
    missing a result against the CDN box score, then recomputes
-   `running_record` from `RECORD_START` onward.
+   `running_record` all-time (includes the 5 retroactively seeded 2026
+   Finals rows from `seed_finals.py`).
 6. **Daily state** (`daily_state.py`, the second, independent step of
    `daily_run.py --evaluate` — it still runs even if step 5 raised) fetches
    newly-completed games from the cdn.nba.com schedule + box scores, appends
