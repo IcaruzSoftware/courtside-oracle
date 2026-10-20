@@ -11,9 +11,10 @@ from pipeline import nba_cdn
 # ---------------------------------------------------------------------------
 
 class _Resp:
-    def __init__(self, status):
+    def __init__(self, status, headers=None):
         self.status_code = status
         self.content = b"x" * 10
+        self.headers = headers or {}
 
     def json(self):
         return {"game": {"ok": True}, "leagueSchedule": {"gameDates": []}}
@@ -31,10 +32,10 @@ class _FakeSession:
     def get(self, url, timeout=None, proxies=None):
         key = proxies["https"] if proxies else None
         self.calls.append(key)
-        kind, val = self.behavior[key]
+        kind, val, *headers = self.behavior[key]
         if kind == "raise":
             raise val
-        return _Resp(val)
+        return _Resp(val, *headers)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +99,18 @@ def test_403_triggers_failover(monkeypatch):
     monkeypatch.setattr(nba_cdn, "_get_session", lambda: fake)
     nba_cdn.fetch_schedule()
     assert fake.calls == ["http://p0:1", "http://p1:2"]
+
+
+def test_s3_403_is_not_found_without_failover(monkeypatch):
+    # 403 from the S3 origin (x-amz-request-id) = missing object, not an IP block.
+    monkeypatch.setenv(nba_cdn.PROXY_ENV, "http://p0:1,http://p1:2")
+    fake = _FakeSession({
+        "http://p0:1": ("ok", 403, {"x-amz-request-id": "ABC"}),
+        "http://p1:2": ("ok", 200),
+    })
+    monkeypatch.setattr(nba_cdn, "_get_session", lambda: fake)
+    assert nba_cdn.fetch_boxscore("0022600001") is None
+    assert fake.calls == ["http://p0:1"]
 
 
 # ---------------------------------------------------------------------------

@@ -157,7 +157,9 @@ Two completely different NBA data sources are used, for two different jobs:
      `games_for_date()`).
    - `liveData/boxscore/boxscore_{game_id}.json` — one game's live box score
      (`fetch_boxscore()`), basic counting stats only. Exists from the
-     **2019-20 season onward**; older game IDs return 403/404.
+     **2019-20 season onward**; older or not-yet-played game IDs return 404 or
+     an S3-origin 403 (`x-amz-request-id` header) — both mean "not found",
+     unlike an Akamai IP-block 403 (no `x-amz-*` headers).
 
    **Confirmed: cdn.nba.com also returns 403 from GitHub-hosted runners** even
    with `CDN_HEADERS` (NBA blacklists cloud IP ranges), while it works direct

@@ -2,7 +2,15 @@
 
 from datetime import datetime
 
+import pytest
+
 import pipeline.evaluate as ev
+
+
+@pytest.fixture(autouse=True)
+def _freeze_today_et(monkeypatch):
+    # Seeds use 2026-11 game dates; pin "today" after them so they count as started.
+    monkeypatch.setattr(ev, "_today_et", lambda: "2026-11-10")
 
 
 def test_running_record_is_all_time(monkeypatch, fake_supabase):
@@ -71,3 +79,47 @@ def test_running_record_recomputed_when_no_pending(fake_supabase):
     assert rec["accuracy"] == round(2 / 3, 4)
     assert rec["last_updated"]
     datetime.fromisoformat(rec["last_updated"])
+
+
+def test_record_recomputed_when_fetch_raises(monkeypatch, fake_supabase):
+    seed = {"predictions": [
+        {"id": "a", "game_id": "0022600001", "game_date": "2026-11-01",
+         "predicted_team": "BOS", "home_team": "BOS", "away_team": "DET",
+         "actual_winner": None, "correct": None},
+        {"id": "b", "game_id": "0022600002", "game_date": "2026-11-02",
+         "predicted_team": "LAL", "actual_winner": "LAL", "correct": True},
+    ], "running_record": []}
+    db = fake_supabase(seed)
+
+    def boom(ids):
+        raise RuntimeError("All NBA CDN channels failed")
+    monkeypatch.setattr(ev, "_fetch_results_cdn", boom)
+
+    with pytest.raises(RuntimeError):
+        ev.evaluate(dry_run=False, db=db)
+
+    rec = [w[2] for w in db.writes if w[0] == "running_record" and w[1] == "upsert"][-1]
+    assert rec["total_correct"] == 1
+    assert rec["total_incorrect"] == 0
+
+
+def test_unstarted_games_are_not_fetched(monkeypatch, fake_supabase):
+    pending = {"predicted_team": "BOS", "home_team": "BOS", "away_team": "DET",
+               "actual_winner": None, "correct": None}
+    seed = {"predictions": [
+        # tipped off (Supabase TIMESTAMPTZ format)
+        {"id": "a", "game_id": "0042500405", "game_date": "2026-06-13",
+         "game_time_utc": "2026-06-14T00:30:00+00:00", **pending},
+        # future tip-off (CDN 'Z' format)
+        {"id": "f", "game_id": "0022600099", "game_date": "2099-01-01",
+         "game_time_utc": "2099-01-01T23:30:00Z", **pending},
+        # no tip-off time, game_date is "today" ET -> not started
+        {"id": "t", "game_id": "0022600098", "game_date": "2026-11-10",
+         "game_time_utc": None, **pending},
+    ], "running_record": []}
+    db = fake_supabase(seed)
+    fetched = []
+    monkeypatch.setattr(ev, "_fetch_results_cdn", lambda ids: fetched.extend(ids) or {})
+
+    ev.evaluate(dry_run=True, db=db)
+    assert fetched == ["0042500405"]

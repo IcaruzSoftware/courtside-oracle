@@ -12,7 +12,9 @@ Endpoints
   schedule   https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json
   box score  https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{gameId}.json
 
-CDN box scores exist from the 2019-20 season onward; older game IDs return 403.
+CDN box scores exist from the 2019-20 season onward. A missing box score (game
+not played yet, or pre-2019-20) comes back as 404 or as a 403 from the S3 origin
+(x-amz-request-id header, XML AccessDenied body) — see _not_found().
 
 Game-ID prefixes (first 3 chars of the 10-digit id):
   001 preseason   002 regular season   003 all-star
@@ -143,14 +145,22 @@ def _host_port(channel) -> str:
     return f"{p.hostname}:{p.port}"
 
 
+def _not_found(resp: requests.Response) -> bool:
+    """True if the CDN says the object doesn't exist: a 404, or a 403 from the S3
+    origin behind Akamai (carries x-amz-request-id; the request got past the edge,
+    so the IP is fine). An Akamai IP-block 403 has no x-amz-* headers."""
+    return resp.status_code == 404 or (
+        resp.status_code == 403 and "x-amz-request-id" in resp.headers)
+
+
 def _get_with_failover(url: str) -> requests.Response:
     """
     GET ``url`` through the configured channels with sticky failover.
 
     Tries the last-working channel first, then the rest in order. A ProxyError /
-    ConnectionError / Timeout, or an HTTP 403 (Akamai block of that IP), moves on to
-    the next channel. A 200 or 404 is returned (the caller handles 404). If every
-    channel fails, raises a RuntimeError summarising each as
+    ConnectionError / Timeout, or an Akamai HTTP 403 (IP block), moves on to the next
+    channel. A 200 or a not-found response (see _not_found) is returned; the caller
+    handles not-found. If every channel fails, raises a RuntimeError summarising each as
     ``proxy #i (host:port): <error type or HTTP status>`` — host:port only, never
     credentials.
     """
@@ -168,10 +178,10 @@ def _get_with_failover(url: str) -> requests.Response:
         except requests.exceptions.RequestException as exc:
             failures.append(f"proxy #{i} ({_host_port(channel)}): {type(exc).__name__}")
             continue
-        if resp.status_code in (200, 404):
+        if resp.status_code == 200 or _not_found(resp):
             _sticky_idx = i
             return resp
-        # 403 (IP blocked) or any other status -> try the next channel.
+        # Akamai 403 (IP blocked) or any other status -> try the next channel.
         failures.append(f"proxy #{i} ({_host_port(channel)}): HTTP {resp.status_code}")
 
     raise RuntimeError("All NBA CDN channels failed: " + "; ".join(failures))
@@ -303,17 +313,16 @@ def games_for_date(et_date: str, schedule: dict | None = None) -> list[dict]:
 def fetch_boxscore(game_id: str) -> dict | None:
     """
     Fetch one game's live box score. Returns the ``game`` sub-dict, or None when the
-    box score does not exist yet (HTTP 404 — a scheduled/not-yet-played game).
+    box score does not exist yet (a scheduled/not-yet-played game): HTTP 404, or a 403
+    from the S3 origin (x-amz-request-id header) — see _not_found.
 
-    A 403 is Akamai "Access Denied" (blocked IP): it triggers proxy failover inside
-    _get_with_failover, and if every channel is blocked the whole fetch raises. The
-    daily pipeline only fetches games from 2019-20 onward (which all have box scores),
-    so a 403 never means "not available".
+    An Akamai 403 (blocked IP, no x-amz-* headers) triggers proxy failover inside
+    _get_with_failover, and if every channel is blocked the whole fetch raises.
     """
     gid = str(game_id).zfill(10)
     resp = _get_with_failover(BOXSCORE_URL.format(game_id=gid))
-    if resp.status_code == 404:
-        logger.info("boxscore %s not available yet (HTTP 404)", gid)
+    if _not_found(resp):
+        logger.info("boxscore %s not available yet (HTTP %d)", gid, resp.status_code)
         return None
     try:
         return resp.json().get("game")

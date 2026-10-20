@@ -6,11 +6,13 @@ Run the morning after games complete:
   python src/pipeline/evaluate.py --dry-run     # print, don't write
 
 What it does:
-  1. Fetches predictions from Supabase where actual_winner is NULL
+  1. Fetches predictions from Supabase where actual_winner is NULL, keeping only games
+     that have started (tip-off <= now, or game_date before today ET if no tip-off time)
   2. Pulls final results from the NBA CDN box score (never stats.nba.com game logs)
   3. Marks each prediction correct/wrong + stores actual_winner
   4. Recomputes the running_record over all resolved predictions (all-time, including
-     the retroactively-seeded 2026 Finals rows from seed_finals.py).
+     the retroactively-seeded 2026 Finals rows from seed_finals.py). This runs even if
+     step 2 raised; the error still propagates afterwards.
 """
 
 import argparse
@@ -22,6 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+from pipeline.daily_state import _today_et
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -53,6 +57,15 @@ def _fetch_results_cdn(game_ids: list[str]) -> dict[str, str]:
     return results
 
 
+def _started(pred: dict, now_utc: datetime, today_et: str) -> bool:
+    """True if the game has tipped off: game_time_utc <= now, or (no tip-off time)
+    game_date before today ET."""
+    tip = pred.get("game_time_utc")
+    if tip:
+        return datetime.fromisoformat(tip) <= now_utc   # accepts 'Z' and '+00:00'
+    return str(pred["game_date"]) < today_et
+
+
 def evaluate(dry_run: bool = False, db=None) -> None:
     if db is None:
         if not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY")):
@@ -64,6 +77,21 @@ def evaluate(dry_run: bool = False, db=None) -> None:
 
     # All predictions without a result yet
     pending = (db.table("predictions").select("*").is_("actual_winner", "null").execute().data) or []
+    now_utc, today_et = datetime.now(timezone.utc), _today_et()
+    started = [p for p in pending if _started(p, now_utc, today_et)]
+    if len(started) < len(pending):
+        logger.info("Skipping %d pending prediction(s) not started yet.",
+                    len(pending) - len(started))
+    try:
+        _grade(db, started, dry_run)
+    finally:
+        # Recompute the running record on every run — even if grading raised — so the
+        # site reflects the correct all-time tally; the error still propagates.
+        _recompute_running_record(db, dry_run)
+
+
+def _grade(db, pending: list[dict], dry_run: bool) -> None:
+    """Resolve started pending predictions against CDN results."""
     if not pending:
         logger.info("No pending predictions to evaluate.")
     else:
@@ -92,10 +120,6 @@ def evaluate(dry_run: bool = False, db=None) -> None:
             updated += 1
         if updated == 0:
             logger.info("No completed games found yet.")
-
-    # Recompute the running record on every run, so the site reflects the correct
-    # all-time tally even on days with nothing to grade.
-    _recompute_running_record(db, dry_run)
 
 
 def _recompute_running_record(db, dry_run: bool) -> None:

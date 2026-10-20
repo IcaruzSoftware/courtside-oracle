@@ -95,9 +95,11 @@ logs at `INFO` level with timestamps. Common causes:
   ESPN's endpoints are reachable. Because the owner wants to keep NBA data, the
   daily jobs route the CDN calls through the residential proxies in the
   `NBA_PROXIES` secret. `nba_cdn` tries the proxies in order, sticks to the last
-  one that worked, and treats a 403 (or a connection error/timeout) from a proxy
-  as "this IP is blocked → fail over to the next". A 404 is still normal (game
-  not played yet → `fetch_boxscore()` returns `None`). If **every** proxy fails,
+  one that worked, and treats an Akamai 403 (no `x-amz-*` headers, HTML body) or
+  a connection error/timeout from a proxy as "this IP is blocked → fail over to
+  the next". A missing box score is still normal (game not played yet →
+  `fetch_boxscore()` returns `None`): a 404, or a 403 from the S3 origin
+  (`x-amz-request-id` header, XML `AccessDenied` body). If **every** proxy fails,
   the fetch raises a summary naming each `proxy #i (host:port): <reason>` —
   host:port only, never credentials — and the job fails loudly (silently skipping
   a day's state update would be worse). **Fix:** rotate or replace the blocked
@@ -115,8 +117,9 @@ logs at `INFO` level with timestamps. Common causes:
   state file, so the rebase itself can't apply cleanly) still needs manual
   resolution — re-run `daily_state.py` locally against the current `main` and
   push the result.
-- **Missing box score yet.** Not a failure — a 404 from the CDN is the normal
-  case for a game that hasn't been played yet. `daily_state.py` logs
+- **Missing box score yet.** Not a failure — a 404, or an S3-origin 403 (with an
+  `x-amz-request-id` header), from the CDN is the normal case for a game that
+  hasn't been played yet. `daily_state.py` logs
   `"box score not available yet"` and simply skips that game until a later
   run picks it up (it re-scans from `LOOKBACK_DAYS` before the last logged
   game every time, so nothing is lost).

@@ -122,9 +122,12 @@ Two unrelated sources, never mixed in one run:
   unchanged). `nba_cdn` fails over across the proxies in order, sticky to the
   last one that worked, and on all-fail raises a summary that names each
   `host:port` but never credentials. Box scores exist from the 2019-20 season
-  onward. `fetch_boxscore()` treats a 404 as normal (game not played yet →
-  `None`) and a 403 as an IP block (failover trigger, loud on total failure,
-  never silently skipped). Verify proxy reachability with
+  onward. `fetch_boxscore()` treats a missing box score as normal (game not
+  played yet → `None`): either a 404 or a 403 from the S3 origin (has an
+  `x-amz-request-id` header, XML `AccessDenied` body). Only an Akamai 403 (no
+  `x-amz-*` headers, HTML body) is an IP block (failover trigger, loud on total
+  failure, never silently skipped). `evaluate.py` only fetches games that have
+  tipped off and recomputes `running_record` even if the fetch raised. Verify proxy reachability with
   `python src/pipeline/nba_cdn.py --check` (or the manual `check_nba_proxies.yml`
   workflow) — see [docs/operations.md](docs/operations.md).
 
