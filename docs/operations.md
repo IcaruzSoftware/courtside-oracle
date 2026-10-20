@@ -31,8 +31,8 @@ All three live in `.github/workflows/` and run on `ubuntu-latest` with Python
 
 ### `daily_evaluate.yml` — Daily Evaluate
 
-- **Schedule:** `0 7 * * *` (07:00 UTC = 3:00 AM ET, 2:00 AM in winter/EST,
-  after West Coast games are final). Also `workflow_dispatch`.
+- **Schedule:** `58 6 * * *` (06:58 UTC ≈ 3:00 AM ET, 1:58 AM in winter/EST,
+  after West Coast games are final; off the full hour to dodge GitHub's busiest scheduler slot). Also `workflow_dispatch`.
 - **Runs:** `python src/scripts/daily_run.py --evaluate`, which runs two
   independent steps, each in its own try/except: first `evaluate.py` (resolve
   pending predictions, recompute `running_record`), then `daily_state.run()`

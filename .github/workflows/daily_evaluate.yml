@@ -2,7 +2,7 @@ name: Daily Evaluate
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # 3:00 AM ET (2:00 AM in winter/EST), 07:00 UTC, after West Coast games are final — GitHub often starts scheduled runs hours late, which is fine here
+    - cron: "58 6 * * *"  # ~3:00 AM ET (1:58 AM in winter/EST), 06:58 UTC, after West Coast games are final — off the full hour because GitHub's scheduler queue is busiest at :00; it still often starts runs hours late, which is fine here
   workflow_dispatch:
 
 permissions:
