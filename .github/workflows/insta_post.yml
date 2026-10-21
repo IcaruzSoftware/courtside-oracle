@@ -28,10 +28,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Post today's picks to Instagram
+      - name: Post last night's record + today's predictions to Instagram
         env:
           SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:    ${{ secrets.SUPABASE_KEY }}
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           IG_USER_ID:      ${{ secrets.IG_USER_ID }}
+          # The record post fetches CDN box scores; cdn.nba.com blocks GitHub runner IPs.
+          NBA_PROXIES:     ${{ secrets.NBA_PROXIES }}
         run: python src/scripts/post_instagram.py

@@ -56,8 +56,9 @@ All four live in `.github/workflows/` and run on `ubuntu-latest` with Python
   [Instagram auto-posting](#instagram-auto-posting).
 - **Separate run on purpose:** a failed post can never affect the predictions.
   With the IG secrets missing it exits 0 (green no-op).
-- **Commits nothing.** Reads `predictions`, writes `instagram_posts` and the
-  `instagram` storage bucket.
+- **Commits nothing.** Reads `predictions` + `running_record` and CDN box
+  scores (through `NBA_PROXIES`, like the daily jobs), writes `instagram_posts`
+  and the `instagram` storage bucket.
 
 ### `keepalive.yml` — Keepalive
 
@@ -84,7 +85,7 @@ All four live in `.github/workflows/` and run on `ubuntu-latest` with Python
 |---|---|---|
 | `SUPABASE_URL` | `daily_predict.yml`, `daily_evaluate.yml`, `insta_post.yml`, `keepalive.yml` | Public project URL, safe to also keep in local `.env` |
 | `SUPABASE_KEY` | same (`insta_post.yml` needs write access: service-role key) | **Service-role key** — bypasses RLS, full read/write. Never expose this to the web app (see `web`'s `NEXT_PUBLIC_SUPABASE_ANON_KEY`, which is a different, RLS-restricted key baked in at build time via `web/.env.local` — not a GitHub secret, see "Deploying the web app" below) |
-| `NBA_PROXIES` | `daily_predict.yml`, `daily_evaluate.yml`, `check_nba_proxies.yml` | 1–3 static residential proxies, comma-separated `http(s)://user:pass@host:port`. URL-encode special characters in the password (e.g. `@`→`%40`) or urllib3 fails to parse it. Unset/empty → direct connection (local dev). Required in CI (see below). |
+| `NBA_PROXIES` | `daily_predict.yml`, `daily_evaluate.yml`, `insta_post.yml`, `check_nba_proxies.yml` | 1–3 static residential proxies, comma-separated `http(s)://user:pass@host:port`. URL-encode special characters in the password (e.g. `@`→`%40`) or urllib3 fails to parse it. Unset/empty → direct connection (local dev). Required in CI (see below). |
 | `IG_ACCESS_TOKEN` | `insta_post.yml` | Optional. Long-lived system-user token for the Instagram Graph API. Feature is off (no-op) without it. See [Instagram auto-posting](#instagram-auto-posting). |
 | `IG_USER_ID` | `insta_post.yml` | Optional. Instagram professional account ID (`instagram_business_account.id`). Feature is off without it. |
 
@@ -209,56 +210,77 @@ unmigrated database.
 
 ## Instagram auto-posting
 
-`src/scripts/post_instagram.py` posts today's picks (ET) to Instagram. It is
-run by its own workflow, `insta_post.yml` ("Instagram Post"), after "Daily
-Predictions" succeeds — see [above](#insta_postyml--instagram-post).
+`src/scripts/post_instagram.py` makes two post types for date D (today ET,
+`--date`). It is run by its own workflow, `insta_post.yml` ("Instagram Post"),
+after "Daily Predictions" succeeds — see [above](#insta_postyml--instagram-post).
 
-1. Reads today's rows from Supabase `predictions`.
-2. Builds one 1080x1350 slide per game (split confidence bar, 50% marker, team
-   colors + tricodes, no NBA logos). 1 game → single-image post; 2–10 games →
-   carousel. **More than 10 games → only the first 10 by tip-off time are
-   posted, and the caption lists only those.** The caption stays within
-   Instagram's limits (≤ 2,200 characters, ≤ 30 hashtags).
-3. Renders them with headless Chrome (`google-chrome` / `chromium`) to PNG,
-   converts to JPEG with Pillow (Instagram rejects PNG).
-4. Uploads to the public Supabase Storage bucket `instagram` at
-   `<date>/<i>.jpg`.
-5. Posts via the Graph API (graph.facebook.com v23.0): one container per
+- **Record post** (posted first): slide 1 is the all-time running record from
+  `running_record` (same numbers as the site) plus last night's tally; then one
+  result slide per game of D-1: final score, our pick + confidence bar, and a
+  CORRECT / WRONG badge. Final scores come from CDN box scores
+  (`nba_cdn.fetch_boxscore`), never invented: a missing or not-final box score
+  fails the record post. **Skipped (no claim row) unless D-1 has predictions
+  and every one is resolved** (`correct` set), so a later run can still post
+  it. A postponed game stays unresolved and therefore blocks that day's record
+  post (post it by hand, or not at all).
+- **Predictions post**: one slide per predicted game of D ("Today's
+  prediction", "Game i of n", split confidence bar with 50% marker).
+
+Both: 1080x1350, team colors + tricodes (no NBA logos), games ordered **most
+popular first** (fixed `POPULARITY` ranking of the 30 teams, sum of both
+teams' ranks; tip-off breaks ties). Each post type is independent: one failing
+doesn't block the other, but the run exits 1 if either failed.
+
+1. Builds the slides and a caption per post type (site link, ≤ 8 hashtags,
+   within Instagram's 2,200 characters).
+2. Renders them with headless Chrome (`google-chrome` / `chromium`), saves JPEG
+   with Pillow (Instagram rejects PNG).
+3. Uploads to the public Supabase Storage bucket `instagram` at
+   `<date>/<kind>/<i>.jpg`.
+4. Posts via the Graph API (graph.facebook.com v23.0): one container per
    image, a CAROUSEL container (skipped for a single image), poll status,
    `media_publish`.
 
-No NBA CDN calls are involved (data comes from Supabase), so no proxy is
-needed. **No-op (exit 0)** if `IG_ACCESS_TOKEN` or `IG_USER_ID` is unset, or
-there are no predictions for the date.
+**Overflow:** 1 slide → single image, 2–10 → carousel. A carousel holds at most
+10 items, so when posting, predictions keep the **first 10 games in popularity
+order**, the record post the record slide + the **first 9 games**; the caption
+lists only the posted games ("Last night" still counts all of D-1).
+`--render-only` renders everything.
 
-### Dry run
+**No-op (exit 0)** if `IG_ACCESS_TOKEN` or `IG_USER_ID` is unset. The record
+post's CDN calls go through `NBA_PROXIES` (cdn.nba.com blocks GitHub runner
+IPs), so `insta_post.yml` passes that secret too.
+
+### Render only (manual upload)
 
 Needs `SUPABASE_URL` + `SUPABASE_KEY` (the read-only anon key from
-`web/.env.local` is enough) and Chrome/Chromium + Pillow locally. Renders the
-JPEGs, prints their paths and the caption; no upload, no table writes, no Graph
-calls.
+`web/.env.local` is enough), CDN access (direct works from home) and
+Chrome/Chromium + Pillow locally. Reads Supabase and the CDN box scores only;
+no upload, no table writes, no Graph calls. Renders **all** games as PNG:
 
 ```bash
-python src/scripts/post_instagram.py --dry-run --date 2026-10-20
+python src/scripts/post_instagram.py --render-only --date 2026-10-21
 ```
 
-Other flags: `--date YYYY-MM-DD` (default today ET), `--out DIR` (default
-`instagram-out/`, gitignored; output lands in `<out>/<date>/`).
+Output: `<out>/predictions-<D>/1.png…` and `<out>/record-<D>/1.png…`, each with
+a `caption.txt`. `--out DIR` defaults to `instagram-out/` (gitignored, as is
+`instagram-today/`).
 
 ### Idempotency / re-posting
 
-Table `instagram_posts` (`post_date` PK, `media_id`, `created_at`):
+Table `instagram_posts` (PK `(post_date, kind)`, `kind` = `predictions` or
+`record`; `media_id`, `created_at`). Each post type is tracked separately:
 
-- Row for the date exists → skip.
+- Row for the (date, kind) exists → skip that post type.
 - A claim row is inserted **before** publishing and deleted if a step before
-  the final `media_publish` call fails (render, upload, container creation),
+  the final `media_publish` call fails (upload, container creation; rendering happens before the claim),
   so the next run retries; `media_id` is set on success.
 - If `media_publish` itself fails (e.g. a timeout), the post may still have
   gone out, so the claim (with `media_id` NULL) is kept and the run fails red.
   The same applies to a crash between publish and the `media_id` update: that
   day is skipped, so it never double-posts.
 
-To force a re-post of a day, delete that row in the Supabase table editor —
+To force a re-post, delete that (date, kind) row in the Supabase table editor —
 **only if you're sure it didn't post** (check the Instagram account first).
 
 ### Troubleshooting
@@ -271,7 +293,7 @@ secrets are not a failure (green no-op). Common Graph API errors:
 |---|---|
 | code `190` | Token expired or invalid. Generate a new system-user token (setup step 5), update `IG_ACCESS_TOKEN`. |
 | code `10` / `200` | Missing permission. Check the token's permissions and that the Page, Instagram account and app are assigned to the system user; if the app is in Development mode, switch it to Live. |
-| image URL not fetchable | Graph fetches each image by URL, so it must be publicly reachable. Check the `instagram` bucket exists and is public, and that `<date>/<i>.jpg` opens in a logged-out browser. |
+| image URL not fetchable | Graph fetches each image by URL, so it must be publicly reachable. Check the `instagram` bucket exists and is public, and that `<date>/<kind>/<i>.jpg` opens in a logged-out browser. |
 
 Chrome missing locally: install `google-chrome` or `chromium`
 (ubuntu-latest has Chrome preinstalled).
@@ -317,8 +339,10 @@ used because a System User token can have expiration "Never", avoiding the
    Supabase dashboard → Storage → New bucket → name `instagram`, toggle
    "Public bucket" on.
 8. Add the GitHub secrets `IG_ACCESS_TOKEN` and `IG_USER_ID`.
-9. Test: run the local `--dry-run` for a past date with games (e.g.
-   `2026-10-20`, 3 games) and look at the JPEGs in `instagram-out/2026-10-20/`.
+9. Test: run the local `--render-only` for a date with games (e.g.
+   `2026-10-21`: 11 predictions, record post for the 3 games of Oct 20) and look
+   at the PNGs in `instagram-out/predictions-2026-10-21/` and
+   `instagram-out/record-2026-10-21/`.
    Then run "Instagram Post" manually via `workflow_dispatch` (Actions tab) and
    check the Instagram account.
 

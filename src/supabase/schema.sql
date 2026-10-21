@@ -103,14 +103,16 @@ CREATE POLICY "public read model_metadata" ON model_metadata FOR SELECT USING (t
 
 -- ---------------------------------------------------------------------------
 -- instagram_posts + public `instagram` Storage bucket (post_instagram.py)
--- One row per posted date, inserted as a claim (media_id NULL) before publishing
--- so a date is never posted twice. RLS with NO policies: service role only.
--- See also migrations/002_instagram.sql.
+-- One row per posted (date, kind), inserted as a claim (media_id NULL) before
+-- publishing so a post type is never posted twice. RLS with NO policies: service
+-- role only. See also migrations/002_instagram.sql.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS instagram_posts (
-    post_date   DATE PRIMARY KEY,               -- ET game date
+    post_date   DATE NOT NULL,                  -- ET post date (the record post covers the day before)
+    kind        TEXT NOT NULL CHECK (kind IN ('predictions', 'record')),
     media_id    TEXT,                           -- Instagram media id, NULL while claimed
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (post_date, kind)
 );
 
 ALTER TABLE instagram_posts ENABLE ROW LEVEL SECURITY;
