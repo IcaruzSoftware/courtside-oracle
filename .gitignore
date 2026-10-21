@@ -236,3 +236,7 @@ web/node_modules/
 web/.env.local
 web/out/
 !web/lib/
+
+# Manual Instagram uploads and TypeScript build cache
+instagram-today/
+*.tsbuildinfo
