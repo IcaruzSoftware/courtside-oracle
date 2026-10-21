@@ -62,7 +62,7 @@ export default function RecentPredictionsTable({ predictions }: Props) {
                 {p.home_team} <span className="text-brand-muted">vs</span> {p.away_team}
               </span>
 
-              <span className="text-brand-green hidden sm:block">
+              <span className={`${p.correct === false ? "text-red-400" : "text-brand-green"} hidden sm:block`}>
                 {TEAM_NAMES[p.predicted_team] ?? p.predicted_team}
               </span>
 
