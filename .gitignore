@@ -236,3 +236,6 @@ web/node_modules/
 web/.env.local
 web/out/
 !web/lib/
+
+# Instagram slides (src/scripts/post_instagram.py)
+instagram-out/

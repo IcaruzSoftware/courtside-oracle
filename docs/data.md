@@ -131,7 +131,25 @@ the schema but **nothing currently writes to it** — `train.py` saves metrics
 to `train_metrics.json` locally, not to this table. Wire this up if you want
 model-version history in Supabase.
 
-**Row Level Security:** all four tables have RLS enabled with a public
+**`instagram_posts`** — one row per day posted to Instagram (added by
+`src/supabase/migrations/002_instagram.sql`): `post_date` (DATE PK),
+`media_id` (TEXT, Instagram media ID, set after publishing), `created_at`.
+`post_instagram.py` inserts a claim row before publishing and deletes it if
+publishing fails; an existing row means "skip that day". RLS on with **no
+policies** → service role only (not readable via the anon key). See
+[operations.md](operations.md#instagram-auto-posting).
+
+**Storage bucket `instagram`** — public, created by migration 002 (or by
+hand: dashboard → Storage → New bucket → name `instagram`, "Public bucket"
+on). `post_instagram.py` uploads each slide as `<date>/<i>.jpg`; Instagram's
+Graph API fetches the images from these public URLs, so the bucket must stay
+public.
+
+| Location | Committed? | Written by | Purpose |
+|---|---|---|---|
+| `instagram-out/<date>/*.jpg` (repo root) | No (gitignored) | `post_instagram.py` (`--out DIR`, default `instagram-out/`) | Local rendered slides, written by `--dry-run` and by real runs before upload |
+
+**Row Level Security:** `predictions`, `shap_values`, `running_record` and `model_metadata` have RLS enabled with a public
 `SELECT`-only policy (`USING (true)`, no insert/update/delete policy). The
 pipeline connects with the Supabase **service-role key**, which bypasses RLS
 entirely; the anon key used by the website is restricted to reads by these

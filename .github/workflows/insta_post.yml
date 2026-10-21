@@ -1,0 +1,37 @@
+name: Instagram Post
+
+on:
+  # Runs after Daily Predictions succeeds, so today's predictions are in Supabase.
+  # A no-op (exit 0) while the IG_ACCESS_TOKEN / IG_USER_ID secrets are unset.
+  workflow_run:
+    workflows: ["Daily Predictions"]
+    types: [completed]
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  post:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest  # google-chrome is preinstalled (renders the slides)
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Post today's picks to Instagram
+        env:
+          SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:    ${{ secrets.SUPABASE_KEY }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID:      ${{ secrets.IG_USER_ID }}
+        run: python src/scripts/post_instagram.py

@@ -100,3 +100,20 @@ CREATE POLICY "public read predictions"    ON predictions    FOR SELECT USING (t
 CREATE POLICY "public read shap_values"    ON shap_values    FOR SELECT USING (true);
 CREATE POLICY "public read running_record" ON running_record FOR SELECT USING (true);
 CREATE POLICY "public read model_metadata" ON model_metadata FOR SELECT USING (true);
+
+-- ---------------------------------------------------------------------------
+-- instagram_posts + public `instagram` Storage bucket (post_instagram.py)
+-- One row per posted date, inserted as a claim (media_id NULL) before publishing
+-- so a date is never posted twice. RLS with NO policies: service role only.
+-- See also migrations/002_instagram.sql.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS instagram_posts (
+    post_date   DATE PRIMARY KEY,               -- ET game date
+    media_id    TEXT,                           -- Instagram media id, NULL while claimed
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE instagram_posts ENABLE ROW LEVEL SECURITY;
+
+INSERT INTO storage.buckets (id, name, public) VALUES ('instagram', 'instagram', true)
+ON CONFLICT (id) DO NOTHING;
