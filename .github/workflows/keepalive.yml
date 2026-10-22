@@ -39,4 +39,5 @@ jobs:
         run: |
           gh workflow enable daily_evaluate.yml --repo "${{ github.repository }}"
           gh workflow enable daily_predict.yml --repo "${{ github.repository }}"
+          gh workflow enable insta_post.yml --repo "${{ github.repository }}"
           gh workflow enable keepalive.yml --repo "${{ github.repository }}"

@@ -237,6 +237,9 @@ web/.env.local
 web/out/
 !web/lib/
 
-# Manual Instagram uploads and TypeScript build cache
+# Instagram slides (src/scripts/post_instagram.py) and manual uploads
+instagram-out/
 instagram-today/
+
+# TypeScript build cache
 *.tsbuildinfo

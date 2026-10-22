@@ -22,6 +22,8 @@ daily: cdn.nba.com → evaluate.py    → Supabase (resolve predictions, running
 daily: cdn.nba.com → predict.py     → features.py (live) → xgb_model.pkl → Supabase
                                                        │
                         Supabase (RLS) → web/ (Next.js static export) → manual build+upload → Plesk/nginx
+                                                       │
+daily (after predict): Supabase + CDN scores → post_instagram.py → Storage bucket `instagram` → Instagram
 ```
 
 Details: [docs/architecture.md](docs/architecture.md) (module-by-module +
@@ -49,12 +51,15 @@ src/pipeline/
 src/scripts/
   bootstrap_data.py   resumable stats.nba.com downloader for the historical rebuild
   daily_run.py        GitHub Actions entry point: --predict / --evaluate / both
+  post_instagram.py   record post (last night) + predictions post (today), 1080x1350 slides (headless Chrome) -> Storage -> Instagram Graph API
 src/supabase/
   schema.sql            fresh-setup schema (tables + RLS), run once in the SQL editor
   migrations/001_*.sql  brings a pre-existing DB up to schema.sql's shape (game_time_utc + RLS)
+  migrations/002_*.sql  instagram_posts table + public `instagram` storage bucket
 .github/workflows/
   daily_predict.yml   runs after daily_evaluate.yml completes — predict today's games
   daily_evaluate.yml  3:00 AM ET — resolve results + advance committed state
+  insta_post.yml      runs after daily_predict.yml succeeds — post last night's record + today's picks to Instagram
   keepalive.yml       daily — ping Supabase, re-enable workflows GitHub auto-disabled
 web/                  Next.js 15, static export; manual build+upload to the owner's Plesk server (no auto-deploy); app/(main)/ = site, app/card/ = iframe widget
 tests/                pytest; conftest.py has a FakeSupabase + a tiny built-from-fixture live state
@@ -72,6 +77,7 @@ python src/scripts/daily_run.py --predict --dry-run --date 2026-06-13
 python src/scripts/daily_run.py --evaluate --dry-run
 python src/pipeline/daily_state.py --dry-run --date 2026-11-05
 python src/pipeline/evaluate.py --dry-run
+python src/scripts/post_instagram.py --render-only --date 2026-10-21   # PNGs + captions to instagram-out/ (gitignored), no upload/post
 python src/pipeline/predict.py --game-id 0042500237
 python src/pipeline/predict.py --home NYK --away OKC --date 2026-06-05
 python src/pipeline/elo.py --force                          # full ELO rebuild from src/data/raw/
@@ -163,6 +169,17 @@ Two unrelated sources, never mixed in one run:
   for it before retraining, ~14k extra calls ≈ 2.5h). See [docs/data.md](docs/data.md).
 - `scikit-learn==1.8.0` is pinned because `xgb_model.pkl` was pickled with
   it — don't bump it without retraining.
+- Instagram posting is its own workflow (`insta_post.yml`, after "Daily
+  Predictions" succeeds), so a failed post never affects predictions.
+  `post_instagram.py` exits 0 (no-op) if `IG_ACCESS_TOKEN`/`IG_USER_ID` is
+  unset. Two independent post types per day: the record post (all-time record
+  + last night's results, CDN final scores, skipped until every D-1 prediction
+  is resolved) first, then the predictions post. One slide per game, most
+  popular game first (1 = single image, 2–10 = carousel, overflow = first 10
+  slides). A `(post_date, kind)` row in `instagram_posts` means "that post is
+  done" — never double-posts; see
+  [docs/operations.md](docs/operations.md#instagram-auto-posting) before
+  deleting one.
 
 ## Where external things live
 
@@ -174,7 +191,7 @@ Two unrelated sources, never mixed in one run:
 - **NBA proxies**: GitHub secret `NBA_PROXIES` (comma-separated
   `http(s)://user:pass@host:port`, 1–3 static residential proxies) routes the
   daily CDN calls past NBA's cloud-IP block. Passed to `daily_predict.yml`,
-  `daily_evaluate.yml`, and `check_nba_proxies.yml`. The old `PROXIES` secret
+  `daily_evaluate.yml`, `insta_post.yml` (record post box scores), and `check_nba_proxies.yml`. The old `PROXIES` secret
   (nba_api proxy-pool, bootstrap only) is obsolete and unused by the pipeline.
 - **The owner's Plesk server** (nginx; `courtside-oracle.gerritvisser.de` and
   `gerritvisser.de` both resolve to it) serves the static export. No
@@ -183,11 +200,15 @@ Two unrelated sources, never mixed in one run:
   that lets `/card` be iframed on `gerritvisser.de` is set in the server
   config, not by the Next.js app (a static export can't set response headers
   itself).
+- **Instagram**: GitHub secrets `IG_ACCESS_TOKEN` (System User token, never
+  expires) + `IG_USER_ID`, used by `insta_post.yml`; public Supabase Storage
+  bucket `instagram` and table `instagram_posts` (both from migration `002`).
+  Setup guide: [docs/operations.md](docs/operations.md#instagram-auto-posting).
 - **Portfolio embed**: `/card` is iframed from `IcaruzSoftware/portfolio` — a
   breaking change to its markup/query needs a check in that repo too.
 - **GitHub Actions**: public repo, so GitHub auto-disables scheduled
   workflows after 60 days with no repo activity; `keepalive.yml` re-enables
-  all three daily via `gh workflow enable` on every run.
+  all four workflows (itself included) via `gh workflow enable` on every run.
 
 ## Known limitations
 
@@ -226,6 +247,8 @@ Two unrelated sources, never mixed in one run:
   [docs/operations.md](docs/operations.md#applying-a-supabase-migration).
   `001` must land before deploying any web build that queries
   `game_time_utc`.
+- **Change the Instagram graphic** — edit the slide HTML in
+  `post_instagram.py`, check with `--render-only`.
 - **Deploy the web app** — not push-to-deploy: `cd web && npm run build`
   (with `web/.env.local` set), then manually upload `web/out/`'s contents to
   the subdomain on the Plesk server — see
